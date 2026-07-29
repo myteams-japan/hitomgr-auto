@@ -24,13 +24,11 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Install Playwright Browsers
-        run: |
-          npm install -g playwright
-          npx playwright install --with-deps chromium
+      - name: Install dependencies
+        run: npm ci || npm install
 
-      - name: Install 文字化け対策部品
-        run: npm install iconv-lite
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps chromium
 
       - name: Run Automation Script
         env:
