@@ -1,13 +1,10 @@
 name: Job Automation Run
-
 permissions:
   contents: write
-
 on:
   workflow_dispatch:
   schedule:
     - cron: '0 */6 * * *'
-
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -17,19 +14,15 @@ jobs:
         with:
           # カウンターをPushするために書き込み権限付きでチェックアウトします
           token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-
       - name: Install dependencies
         run: npm ci || npm install
-
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps chromium
-
       - name: Run Automation Script
         env:
           HITOMGR_ID_M003: ${{ secrets.HITOMGR_ID_M003 }}
@@ -37,11 +30,14 @@ jobs:
           HITOMGR_ID_U003: ${{ secrets.HITOMGR_ID_U003 }}
         # 実行するJSファイル名に合わせて main.js に修正しました
         run: node main.js
-
       - name: Save counter
+        # ★修正: 直前のステップが失敗(exitCode=1)しても、
+        # counter.jsonの更新・pushを必ず実行するようにする
+        if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add counter.json
           git commit -m "🤖 [Automated] update counter" || exit 0
+          git pull --rebase origin ${{ github.ref }} || true
           git push origin HEAD:${{ github.ref }}
