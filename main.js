@@ -556,6 +556,36 @@ async function getLatestExportStatus(page, acc) {
     const normalized =
       latest.text;
 
+    /*
+     * 最新行のセルを取得
+     *
+     * 列構成：
+     * 0 = リクエスト日時
+     * 1 = データ種別
+     * 2 = ステータス
+     * 3 = 詳細
+     * 4 = 削除予定日
+     */
+    const cells =
+      latest.row.locator('td');
+
+    const cellCount =
+      await cells.count();
+
+    const statusText =
+      cellCount > 2
+        ? (
+            await cells.nth(2).innerText().catch(() => '')
+          ).replace(/\s+/g, ' ').trim()
+        : '';
+
+    const detailText =
+      cellCount > 3
+        ? (
+            await cells.nth(3).innerText().catch(() => '')
+          ).replace(/\s+/g, ' ').trim()
+        : '';
+
     console.log(
       `🔎 【${acc.name}】最新リクエスト日時: ${latest.requestDateText}`
     );
@@ -564,23 +594,30 @@ async function getLatestExportStatus(page, acc) {
       `🔎 【${acc.name}】最新リクエスト行: ${normalized}`
     );
 
+    console.log(
+      `🔎 【${acc.name}】最新行ステータス欄: ${statusText}`
+    );
+
     /*
      * ========================================================
      * 進行中
+     *
+     * ステータス欄だけを判定する。
+     * 詳細欄に残っている「進行中」は判定しない。
      * ========================================================
      */
     if (
-      normalized.includes('進行中') ||
-      normalized.includes('出力中')
+      statusText.includes('進行中') ||
+      statusText.includes('出力中')
     ) {
 
       const progressMatch =
-        normalized.match(
+        detailText.match(
           /\d+\/\d+件(?:出力中|進行中)/
         );
 
       const timeMatch =
-        normalized.match(
+        detailText.match(
           /残り約(?:\d+分)?(?:\d+秒)?/
         );
 
@@ -615,7 +652,7 @@ async function getLatestExportStatus(page, acc) {
      * ========================================================
      */
     if (
-      normalized.includes('待機中')
+      statusText.includes('待機中')
     ) {
 
       return {
@@ -628,10 +665,13 @@ async function getLatestExportStatus(page, acc) {
     /*
      * ========================================================
      * 完了
+     *
+     * ステータス欄の「完了」だけを判定する。
+     * 詳細欄や他の表示にある「完了」は判定しない。
      * ========================================================
      */
     if (
-      normalized.includes('完了')
+      statusText.includes('完了')
     ) {
 
       return {
@@ -645,11 +685,12 @@ async function getLatestExportStatus(page, acc) {
      * ========================================================
      * 本当にキャンセルされた場合のみ
      *
-     * [キャンセル] などの操作リンク文字は除外する
+     * ステータス欄だけを判定する。
+     * 詳細欄の「キャンセル」は操作リンクなので無視する。
      * ========================================================
      */
     const withoutCancelLink =
-      normalized
+      statusText
         .replace(/\[?キャンセル\]?/g, '')
         .replace(/キャンセルする/g, '')
         .trim();
