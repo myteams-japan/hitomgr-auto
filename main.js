@@ -386,62 +386,77 @@ async function downloadAndPrepareCSV(browser, acc) {
 
     console.log(`⏳ 【${acc.name}】CSV抽出の完了を監視中... (10秒インターバル監視)`);
 
-    // 🔄 HTML構造に依存せず、画面全体の文字要素から現在のステータスを追うロジック
+    // ★修正: 画面全体のテキストを行分解して推測する方式は、
+    // 手動リクエストなどで行が複数になると誤判定・無限ループの原因になるため、
+    // 「一番新しい行（テーブルの1行目）」だけを直接読み取る方式に変更。
+    // さらに、万が一検知に失敗し続けても永遠にループしないよう、最大待機時間を設ける。
+    const MAX_WAIT_MS = 3 * 60 * 60 * 1000; // 最大3時間まで監視（超えたらタイムアウトエラー）
+    const POLL_INTERVAL_MS = 10000;
+    const startTime = Date.now();
+    let noStatusStreak = 0;
+
     while (true) {
-      await page.waitForTimeout(10000);
+      if (Date.now() - startTime > MAX_WAIT_MS) {
+        throw new Error(`CSV抽出の監視がタイムアウトしました（${MAX_WAIT_MS / 60000}分経過）。`);
+      }
+
+      await page.waitForTimeout(POLL_INTERVAL_MS);
 
       try {
-        const pageText = await page.evaluate(() => document.body.innerText || "");
-        const lines = pageText.split('\n').map(l => l.trim()).filter(Boolean);
+        // テーブルの一番上（＝最新）のデータ行だけを取得する。
+        // 複数行あっても、他の行の文字に影響されない。
+        const firstRow = page.locator('table tr:has(td)').first();
+        const rowCount = await firstRow.count();
+
+        if (rowCount === 0) {
+          noStatusStreak++;
+          console.log(`❓ 【${acc.name}】テーブル行がまだ見つかりません。自動リロードを待ちます...(${noStatusStreak}回目)`);
+          continue;
+        }
+
+        const cells = await firstRow.locator('td').allTextContents();
+        const rowText = cells.map(c => c.trim()).join(' ');
 
         let isCompleted = false;
         let statusFound = false;
 
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].includes('リクエスト日時') && lines[i].includes('データ種別')) {
-            const scanArea = lines.slice(i + 1, i + 8).join(' ');
+        // 1. 【最優先】最新リクエストの生成完了判定
+        if (rowText.includes('完了') || rowText.includes('.csv')) {
+          console.log(`✅ 【${acc.name}】CSVの生成完了を確認しました！`);
+          statusFound = true;
+          isCompleted = true;
+        }
 
-            // 1. 【最優先】最新リクエストの生成完了判定
-            if (scanArea.includes('完了') || scanArea.includes('.csv')) {
-              console.log(`✅ 【${acc.name}】CSVの生成完了を確認しました！`);
-              statusFound = true;
-              isCompleted = true;
-              break;
-            } 
-            
-            // 2. 【二優先】最新リクエストの「進行中・出力中」判定
-            else if (scanArea.includes('進行中') || scanArea.includes('出力中')) {
-              const progressMatch = scanArea.match(/\d+\/\d+件(出力中|進行中)/);
-              const timeMatch = scanArea.match(/残り約(\d+分)?(\d+秒)?/);
-              
-              let detailLog = '';
-              if (progressMatch) {
-                detailLog = progressMatch[0];
-                if (timeMatch && timeMatch[0] !== '残り約') {
-                  detailLog += ` ${timeMatch[0]}`;
-                }
-              } else {
-                const fallbackMatch = scanArea.match(/\d+\/\d+件[^\s]*/);
-                detailLog = fallbackMatch ? fallbackMatch[0] : 'データ出力中';
-              }
-              
-              console.log(`⚙️ 【${acc.name}】現在のステータス: [進行中] (${detailLog})`);
-              statusFound = true;
-              break; 
-            } 
-            
-            // 3. 【三優先】最新リクエストの「待機中」判定
-            else if (scanArea.includes('待機中')) {
-              console.log(`⏳ 【${acc.name}】現在のステータス: [待機中] (実行までしばらくお待ち下さい)`);
-              statusFound = true;
-              break; 
-            }
+        // 2. 【二優先】最新リクエストの「進行中・出力中」判定
+        else if (rowText.includes('進行中') || rowText.includes('出力中')) {
+          const progressMatch = rowText.match(/\d+\/\d+件(出力中|進行中)/);
+          const timeMatch = rowText.match(/残り約(\d+分)?(\d+秒)?/);
 
-            // 4. 【最終フォールバック】単一で「キャンセル」状態になっている場合のみエラー判定
-            else if (scanArea.includes('キャンセル')) {
-              throw new Error(`管理画面側でリクエストが「キャンセル」されました。`);
+          let detailLog = '';
+          if (progressMatch) {
+            detailLog = progressMatch[0];
+            if (timeMatch && timeMatch[0] !== '残り約') {
+              detailLog += ` ${timeMatch[0]}`;
             }
+          } else {
+            const fallbackMatch = rowText.match(/\d+\/\d+件[^\s]*/);
+            detailLog = fallbackMatch ? fallbackMatch[0] : 'データ出力中';
           }
+
+          console.log(`⚙️ 【${acc.name}】現在のステータス: [進行中] (${detailLog})`);
+          statusFound = true;
+        }
+
+        // 3. 【三優先】最新リクエストの「待機中」判定
+        else if (rowText.includes('待機中')) {
+          console.log(`⏳ 【${acc.name}】現在のステータス: [待機中] (実行までしばらくお待ち下さい)`);
+          statusFound = true;
+        }
+
+        // 4. 【最終フォールバック】最新の行が「キャンセル」状態の場合のみエラー判定
+        // （最新行だけを見ているので、過去のキャンセル済みリクエストに惑わされない）
+        else if (rowText.includes('キャンセル')) {
+          throw new Error(`管理画面側で最新のリクエストが「キャンセル」されました。`);
         }
 
         if (isCompleted) {
@@ -449,11 +464,14 @@ async function downloadAndPrepareCSV(browser, acc) {
         }
 
         if (!statusFound) {
-          console.log(`❓ 【${acc.name}】ステータス文字が特定できません。自動リロードを待ちます...`);
+          noStatusStreak++;
+          console.log(`❓ 【${acc.name}】ステータス文字が特定できません。自動リロードを待ちます...(${noStatusStreak}回目) [行内容: ${rowText}]`);
+        } else {
+          noStatusStreak = 0;
         }
 
       } catch (e) {
-        if (e.message.includes('キャンセル')) throw e;
+        if (e.message.includes('キャンセル') || e.message.includes('タイムアウト')) throw e;
         console.log(`⚠️ 【${acc.name}】監視ループ内で一時的なエラー（自動リロードと重複）: ${e.message}`);
       }
     }
