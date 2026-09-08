@@ -1,4 +1,3 @@
-
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -936,10 +935,10 @@ async function downloadAndPrepareCSV(browser, acc) {
     );
 
     /*
-     * 最大60分
+     * 最大120分
      */
     const maxWaitMs =
-      60 * 60 * 1000;
+      120 * 60 * 1000;
 
     const checkIntervalMs =
       10000;
@@ -1036,7 +1035,7 @@ async function downloadAndPrepareCSV(browser, acc) {
       ) {
 
         throw new Error(
-          'CSV取出処理が60分経過しても完了しませんでした。'
+          'CSV取出処理が120分経過しても完了しませんでした。'
         );
       }
 
@@ -1435,4 +1434,3 @@ async function executePvSet(page, acc, processed) {
   }
 
 })();
-
