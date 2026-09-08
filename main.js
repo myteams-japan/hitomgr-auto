@@ -1,3 +1,4 @@
+```javascript
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -453,11 +454,14 @@ async function uploadSingleFileOnly(page, acc, fileToUpload, label) {
 
 /*
  * ============================================================
- * 取出ファイル一覧から「最新の実処理行」を取得
+ * 取出ファイル一覧から「画面上で一番新しいリクエスト日時の行」
+ * のみを取得してステータス判定
  *
  * ポイント：
- * [キャンセル] はキャンセル操作リンクなので、
- * 「キャンセル状態」とは判定しない。
+ * ・一覧の全行からリクエスト日時を取得
+ * ・日時が一番新しい行だけを判定対象にする
+ * ・古い「完了」行は一切判定しない
+ * ・[キャンセル] はキャンセル操作リンクなので無視する
  * ============================================================
  */
 async function getLatestExportStatus(page, acc) {
@@ -468,160 +472,240 @@ async function getLatestExportStatus(page, acc) {
 
   const rowCount = await rows.count();
 
-  if (rowCount > 0) {
+  /*
+   * ==========================================================
+   * まず「リクエスト日時を持つ行」をすべて取得
+   * ==========================================================
+   */
+  const candidateRows = [];
 
-    for (let i = 0; i < rowCount; i++) {
+  for (let i = 0; i < rowCount; i++) {
 
-      const row = rows.nth(i);
+    const row = rows.nth(i);
 
-      const text = (
-        await row.innerText().catch(() => '')
-      ).trim();
+    const text = (
+      await row.innerText().catch(() => '')
+    ).trim();
 
-      if (!text) continue;
+    if (!text) continue;
 
-      /*
-       * リクエスト日時がある実データ行だけ対象
-       */
-      if (
-        text.includes('リクエスト日時') ||
-        /\d{4}\/\d{1,2}\/\d{1,2}\s+\d{1,2}:\d{2}/.test(text)
-      ) {
+    const normalized = text
+      .replace(/\s+/g, ' ')
+      .trim();
 
-        /*
-         * 「キャンセル」という文字は無視する。
-         *
-         * 実際にキャンセル状態なら、
-         * ステータス部分そのものが「キャンセル」になる。
-         */
+    /*
+     * 日時を取得
+     *
+     * 対応例：
+     * 2026/09/08 15:30
+     * 2026/9/8 15:30
+     * 2026/09/08 15:30:45
+     */
+    const dateMatch = normalized.match(
+      /(\d{4}\/\d{1,2}\/\d{1,2})\s+(\d{1,2}:\d{2}(?::\d{2})?)/
+    );
 
-        const normalized = text
-          .replace(/\s+/g, ' ')
-          .trim();
+    if (!dateMatch) continue;
 
-        /*
-         * 進行中
-         */
-        if (
-          normalized.includes('進行中') ||
-          normalized.includes('出力中')
-        ) {
+    const requestDateText =
+      `${dateMatch[1]} ${dateMatch[2]}`;
 
-          const progressMatch =
-            normalized.match(
-              /\d+\/\d+件(?:出力中|進行中)/
-            );
+    /*
+     * JavaScriptで比較できる日時へ変換
+     */
+    const requestDate =
+      new Date(
+        requestDateText.replace(
+          /^(\d{4})\/(\d{1,2})\/(\d{1,2})/,
+          '$1-$2-$3'
+        )
+      );
 
-          const timeMatch =
-            normalized.match(
-              /残り約(?:\d+分)?(?:\d+秒)?/
-            );
-
-          let detail = 'データ出力中';
-
-          if (progressMatch) {
-            detail = progressMatch[0];
-
-            if (
-              timeMatch &&
-              timeMatch[0] !== '残り約'
-            ) {
-              detail += ` ${timeMatch[0]}`;
-            }
-          }
-
-          return {
-            status: '進行中',
-            text: normalized,
-            detail
-          };
-        }
-
-        /*
-         * 待機中
-         */
-        if (
-          normalized.includes('待機中')
-        ) {
-
-          return {
-            status: '待機中',
-            text: normalized,
-            detail: '実行待ち'
-          };
-        }
-
-        /*
-         * 完了
-         */
-        if (
-          normalized.includes('完了')
-        ) {
-
-          return {
-            status: '完了',
-            text: normalized,
-            detail: 'CSV生成完了'
-          };
-        }
-
-        /*
-         * 本当にキャンセルされた場合のみ
-         *
-         * [キャンセル] の操作リンクは除外。
-         */
-        const withoutCancelLink =
-          normalized
-            .replace(/\[?キャンセル\]?/g, '')
-            .replace(/キャンセルする/g, '')
-            .trim();
-
-        if (
-          withoutCancelLink === 'キャンセル' ||
-          withoutCancelLink.endsWith(' ステータス:キャンセル')
-        ) {
-
-          return {
-            status: 'キャンセル',
-            text: normalized,
-            detail: '管理画面側でキャンセル'
-          };
-        }
-
-        /*
-         * 状態不明
-         */
-        return {
-          status: '不明',
-          text: normalized,
-          detail: '状態確認中'
-        };
-      }
+    if (
+      Number.isNaN(
+        requestDate.getTime()
+      )
+    ) {
+      continue;
     }
+
+    candidateRows.push({
+      index: i,
+      row,
+      text: normalized,
+      requestDateText,
+      requestDate
+    });
   }
 
   /*
-   * テーブル構造が取れない場合のフォールバック
-   *
-   * ここでは「キャンセル」を絶対に単独判定しない。
+   * ==========================================================
+   * 一番新しいリクエスト日時の行だけを取得
+   * ==========================================================
    */
-  const pageText = await page.evaluate(() => {
-    return document.body.innerText || '';
-  });
+  if (candidateRows.length > 0) {
 
-  const lines = pageText
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean);
+    candidateRows.sort(
+      (a, b) =>
+        b.requestDate.getTime() -
+        a.requestDate.getTime()
+    );
+
+    const latest =
+      candidateRows[0];
+
+    const normalized =
+      latest.text;
+
+    console.log(
+      `🔎 【${acc.name}】最新リクエスト日時: ${latest.requestDateText}`
+    );
+
+    console.log(
+      `🔎 【${acc.name}】最新リクエスト行: ${normalized}`
+    );
+
+    /*
+     * ========================================================
+     * 進行中
+     * ========================================================
+     */
+    if (
+      normalized.includes('進行中') ||
+      normalized.includes('出力中')
+    ) {
+
+      const progressMatch =
+        normalized.match(
+          /\d+\/\d+件(?:出力中|進行中)/
+        );
+
+      const timeMatch =
+        normalized.match(
+          /残り約(?:\d+分)?(?:\d+秒)?/
+        );
+
+      let detail =
+        'データ出力中';
+
+      if (progressMatch) {
+
+        detail =
+          progressMatch[0];
+
+        if (
+          timeMatch &&
+          timeMatch[0] !== '残り約'
+        ) {
+
+          detail +=
+            ` ${timeMatch[0]}`;
+        }
+      }
+
+      return {
+        status: '進行中',
+        text: normalized,
+        detail
+      };
+    }
+
+    /*
+     * ========================================================
+     * 待機中
+     * ========================================================
+     */
+    if (
+      normalized.includes('待機中')
+    ) {
+
+      return {
+        status: '待機中',
+        text: normalized,
+        detail: '実行待ち'
+      };
+    }
+
+    /*
+     * ========================================================
+     * 完了
+     * ========================================================
+     */
+    if (
+      normalized.includes('完了')
+    ) {
+
+      return {
+        status: '完了',
+        text: normalized,
+        detail: 'CSV生成完了'
+      };
+    }
+
+    /*
+     * ========================================================
+     * 本当にキャンセルされた場合のみ
+     *
+     * [キャンセル] などの操作リンク文字は除外する
+     * ========================================================
+     */
+    const withoutCancelLink =
+      normalized
+        .replace(/\[?キャンセル\]?/g, '')
+        .replace(/キャンセルする/g, '')
+        .trim();
+
+    if (
+      withoutCancelLink === 'キャンセル' ||
+      withoutCancelLink.endsWith(' ステータス:キャンセル')
+    ) {
+
+      return {
+        status: 'キャンセル',
+        text: normalized,
+        detail: '管理画面側でキャンセル'
+      };
+    }
+
+    /*
+     * ========================================================
+     * 状態不明
+     * ========================================================
+     */
+    return {
+      status: '不明',
+      text: normalized,
+      detail: '状態確認中'
+    };
+  }
 
   /*
-   * 「進行中」があれば進行中を優先
+   * ==========================================================
+   * テーブルから日時が取得できない場合のフォールバック
+   *
+   * 「キャンセル」だけでは絶対にキャンセル扱いしない
+   * ==========================================================
    */
-  const progressLine = lines.find(
-    line =>
-      line.includes('進行中') ||
-      line.includes('出力中')
-  );
+  const pageText =
+    await page.evaluate(() => {
+      return document.body.innerText || '';
+    });
+
+  const lines =
+    pageText
+      .split('\n')
+      .map(l => l.trim())
+      .filter(Boolean);
+
+  /*
+   * 進行中
+   */
+  const progressLine =
+    lines.find(
+      line =>
+        line.includes('進行中') ||
+        line.includes('出力中')
+    );
 
   if (progressLine) {
 
@@ -635,16 +719,21 @@ async function getLatestExportStatus(page, acc) {
         /残り約(?:\d+分)?(?:\d+秒)?/
       );
 
-    let detail = 'データ出力中';
+    let detail =
+      'データ出力中';
 
     if (progressMatch) {
-      detail = progressMatch[0];
+
+      detail =
+        progressMatch[0];
 
       if (
         timeMatch &&
         timeMatch[0] !== '残り約'
       ) {
-        detail += ` ${timeMatch[0]}`;
+
+        detail +=
+          ` ${timeMatch[0]}`;
       }
     }
 
@@ -658,9 +747,10 @@ async function getLatestExportStatus(page, acc) {
   /*
    * 待機中
    */
-  const waitingLine = lines.find(
-    line => line.includes('待機中')
-  );
+  const waitingLine =
+    lines.find(
+      line => line.includes('待機中')
+    );
 
   if (waitingLine) {
 
@@ -674,9 +764,10 @@ async function getLatestExportStatus(page, acc) {
   /*
    * 完了
    */
-  const completeLine = lines.find(
-    line => line.includes('完了')
-  );
+  const completeLine =
+    lines.find(
+      line => line.includes('完了')
+    );
 
   if (completeLine) {
 
@@ -688,7 +779,7 @@ async function getLatestExportStatus(page, acc) {
   }
 
   /*
-   * 「キャンセル」だけでは絶対にエラーにしない。
+   * 「キャンセル」だけでは絶対にエラーにしない
    */
   return {
     status: '不明',
@@ -1344,3 +1435,4 @@ async function executePvSet(page, acc, processed) {
   }
 
 })();
+```
