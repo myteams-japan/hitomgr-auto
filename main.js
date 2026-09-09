@@ -837,8 +837,10 @@ async function getLatestExportStatus(page, acc) {
 async function findDownloadLink(page) {
 
   const selectors = [
+    'table tr:has(td) a[href*="/download/"]',
     'table tr:has(td) a[href*=".csv"]',
     'table tr:has(td) a:has-text("ダウンロード")',
+    'a[href*="/download/"]',
     'a[href*=".csv"]',
     'a:has-text("ダウンロード")'
   ];
@@ -857,8 +859,62 @@ async function findDownloadLink(page) {
       if (
         await link.isVisible().catch(() => false)
       ) {
+
+        const href =
+          await link.getAttribute('href').catch(() => null);
+
+        const text =
+          await link.innerText().catch(() => '');
+
+        console.log(
+          `🔎 ダウンロードリンク候補を検出: ${text.trim()} ${href || ''}`
+        );
+
         return link;
       }
+    }
+  }
+
+  /*
+   * 「取出しファイル: ファイル名.csv」の表示を持つ
+   * リンクを直接探索する
+   */
+  const csvLinks =
+    page.locator('a');
+
+  const csvLinkCount =
+    await csvLinks.count();
+
+  for (let i = 0; i < csvLinkCount; i++) {
+
+    const link =
+      csvLinks.nth(i);
+
+    if (
+      !(await link.isVisible().catch(() => false))
+    ) {
+      continue;
+    }
+
+    const href =
+      await link.getAttribute('href').catch(() => null);
+
+    const text =
+      await link.innerText().catch(() => '');
+
+    if (
+      (href && (
+        href.includes('/download/') ||
+        href.toLowerCase().includes('.csv')
+      )) ||
+      text.trim().toLowerCase().endsWith('.csv')
+    ) {
+
+      console.log(
+        `🔎 CSVダウンロードリンクを直接検出: ${text.trim()} ${href || ''}`
+      );
+
+      return link;
     }
   }
 
