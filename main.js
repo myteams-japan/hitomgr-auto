@@ -2,7 +2,6 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const iconv = require('iconv-lite');
-
 const accounts = [
   {
     name: 'A',
@@ -17,6 +16,7 @@ const accounts = [
     password: process.env.HITOMGR_PASSWORD_PASSU003
   }
 ];
+const CHATWORK_ROOM_ID = '397819592';
 
 function safeLog(value) {
   let text = String(value);
@@ -35,6 +35,55 @@ function safeLog(value) {
       return '[URL]';
     }
   }).slice(0, 1500);
+}
+
+async function sendChatworkError(currentState, acc, error) {
+  const token = process.env.CHATWORK_API_TOKEN;
+  if (!token) {
+    console.warn('⚠️ CHATWORK_API_TOKENが設定されていないためChatwork通知を送信できません。');
+    return;
+  }
+  const message = [
+    '[info][title]HITO-Manager 自動処理エラー[/title]',
+    `処理：${currentState}`,
+    `アカウント：${acc ? acc.name : '不明'}`,
+    `失敗工程：${acc && acc.logStage ? acc.logStage : '不明'}`,
+    `予約：${acc && acc.exportRequestKey ? acc.exportRequestKey : '未取得'}`,
+    '',
+    'エラー：',
+    safeLog(error && error.message ? error.message : error),
+    '',
+    'GitHub Actionsを確認してください。',
+    '[/info]'
+  ].join('\n');
+  try {
+    const response = await fetch(
+      `https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          'X-ChatWorkToken': token,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          body: message,
+          self_unread: '1'
+        }).toString()
+      }
+    );
+    const responseText = await response.text();
+    if (!response.ok) {
+      console.warn(
+        `⚠️ Chatwork通知失敗 HTTP ${response.status}: ${safeLog(responseText)}`
+      );
+      return;
+    }
+    console.log('✅ Chatworkへエラー通知を送信しました。');
+  } catch (notifyError) {
+    console.warn(
+      `⚠️ Chatwork通知処理でエラー: ${safeLog(notifyError.message)}`
+    );
+  }
 }
 
 function logStage(acc, stage) {
@@ -704,24 +753,28 @@ async function findDownloadLink(page, acc) {
   return null;
 }
 
-async function downloadTargetCSVWithRetry(page, acc, downloadPath) {
+async function downloadTargetCSVWithRetry(
+  page,
+  acc,
+  downloadPath,
+  historySegment
+) {
   const maxAttempts = 5;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(
       `⬇️ 【${acc.name}】CSVダウンロード試行 ${attempt}/${maxAttempts}`
     );
     try {
-      await restoreExportSession(page, acc);
       if (attempt > 1) {
-        await page.reload({
-          waitUntil: 'domcontentloaded',
-          timeout: 60000
-        }).catch(error => {
-          console.warn(
-            `⚠️ 【${acc.name}】再読込失敗: ${safeLog(error.message)}`
-          );
-        });
-        await page.waitForTimeout(5000);
+        await page.goto(
+          acc.url.replace('/login/', '/' + historySegment),
+          {
+            waitUntil: 'domcontentloaded',
+            timeout: 60000
+          }
+        );
+        await restoreExportSession(page, acc);
+        await page.waitForTimeout(3000);
       }
       const downloadLink = await findDownloadLink(page, acc);
       if (!downloadLink) {
@@ -761,17 +814,17 @@ async function downloadTargetCSVWithRetry(page, acc, downloadPath) {
       return;
     } catch (error) {
       console.warn(
-        `⚠️ 【${acc.name}】CSVダウンロード試行 ${attempt}/${maxAttempts} 失敗: ${safeLog(error.message)}`
+        `⚠️ 【${acc.name}】CSVダウンロード失敗（${attempt}/${maxAttempts}）: ${safeLog(error.message)}`
       );
       if (attempt >= maxAttempts) {
         throw new Error(
-          `CSVダウンロードが${maxAttempts}回連続で失敗しました: ${safeLog(error.message)}`
+          `CSVダウンロードを${maxAttempts}回試行しましたが成功しませんでした。予約=${acc.exportRequestKey || '未取得'} / ${safeLog(error.message)}`
         );
       }
       console.log(
-        `🔄 【${acc.name}】同じ取出予約 ${acc.exportRequestKey || '未取得'} のダウンロードを再試行します。`
+        `⏳ 【${acc.name}】30秒待機して同じ予約=${acc.exportRequestKey || '未取得'}を再試行します。`
       );
-      await page.waitForTimeout(15000);
+      await page.waitForTimeout(30000);
     }
   }
 }
@@ -944,12 +997,18 @@ async function downloadAndPrepareCSV(browser, acc) {
     await downloadTargetCSVWithRetry(
       page,
       acc,
-      downloadPath
+      downloadPath,
+      historySegment
     );
     logStage(acc, 'CSV加工');
-    const processed = processCSVFile(downloadPath, acc.name);
+    const processed = processCSVFile(
+      downloadPath,
+      acc.name
+    );
     if (!processed) {
-      throw new Error('CSVデータの加工に失敗しました。');
+      throw new Error(
+        'CSVデータの加工に失敗しました。'
+      );
     }
     logStage(acc, '取込準備完了');
     return {
@@ -971,7 +1030,11 @@ async function downloadAndPrepareCSV(browser, acc) {
   }
 }
 
-async function executeNormalSet(page, acc, processed) {
+async function executeNormalSet(
+  page,
+  acc,
+  processed
+) {
   console.log(
     `📦 【${acc.name}】通常版2ファイルを順番に送信します。`
   );
@@ -992,7 +1055,11 @@ async function executeNormalSet(page, acc, processed) {
   );
 }
 
-async function executePvSet(page, acc, processed) {
+async function executePvSet(
+  page,
+  acc,
+  processed
+) {
   console.log(
     `📦 【${acc.name}】PV版2ファイルを順番に送信します。`
   );
@@ -1014,19 +1081,29 @@ async function executePvSet(page, acc, processed) {
 }
 
 (async () => {
-  const counterPath = path.join(__dirname, 'counter.json');
-  let counterData = { count: 0 };
+  const counterPath = path.join(
+    __dirname,
+    'counter.json'
+  );
+  let counterData = {
+    count: 0
+  };
   try {
     if (fs.existsSync(counterPath)) {
       counterData = JSON.parse(
-        fs.readFileSync(counterPath, 'utf8')
+        fs.readFileSync(
+          counterPath,
+          'utf8'
+        )
       );
     }
   } catch (e) {
     console.log(
       '⚠️ counter.json読み込み失敗。0から開始します。'
     );
-    counterData = { count: 0 };
+    counterData = {
+      count: 0
+    };
   }
   const rotation = [
     'A_NORMAL',
@@ -1034,9 +1111,12 @@ async function executePvSet(page, acc, processed) {
     'B_NORMAL',
     'B_PV'
   ];
-  const index = counterData.count % rotation.length;
-  const currentState = rotation[index];
+  const index =
+    counterData.count % rotation.length;
+  const currentState =
+    rotation[index];
   let succeeded = false;
+  let currentAcc = null;
   console.log(
     `🤖 現在のインデックス: ${index} → 今回の処理: ${currentState}`
   );
@@ -1045,38 +1125,68 @@ async function executePvSet(page, acc, processed) {
   });
   try {
     if (currentState === 'A_NORMAL') {
-      const acc = accounts.find(a => a.name === 'A');
-      const result = await downloadAndPrepareCSV(browser, acc);
+      currentAcc = accounts.find(
+        a => a.name === 'A'
+      );
+      const result =
+        await downloadAndPrepareCSV(
+          browser,
+          currentAcc
+        );
       await executeNormalSet(
         result.page,
-        acc,
+        currentAcc,
         result.processed
       );
       await result.context.close();
-    } else if (currentState === 'A_PV') {
-      const acc = accounts.find(a => a.name === 'A');
-      const result = await downloadAndPrepareCSV(browser, acc);
+    } else if (
+      currentState === 'A_PV'
+    ) {
+      currentAcc = accounts.find(
+        a => a.name === 'A'
+      );
+      const result =
+        await downloadAndPrepareCSV(
+          browser,
+          currentAcc
+        );
       await executePvSet(
         result.page,
-        acc,
+        currentAcc,
         result.processed
       );
       await result.context.close();
-    } else if (currentState === 'B_NORMAL') {
-      const acc = accounts.find(a => a.name === 'B');
-      const result = await downloadAndPrepareCSV(browser, acc);
+    } else if (
+      currentState === 'B_NORMAL'
+    ) {
+      currentAcc = accounts.find(
+        a => a.name === 'B'
+      );
+      const result =
+        await downloadAndPrepareCSV(
+          browser,
+          currentAcc
+        );
       await executeNormalSet(
         result.page,
-        acc,
+        currentAcc,
         result.processed
       );
       await result.context.close();
-    } else if (currentState === 'B_PV') {
-      const acc = accounts.find(a => a.name === 'B');
-      const result = await downloadAndPrepareCSV(browser, acc);
+    } else if (
+      currentState === 'B_PV'
+    ) {
+      currentAcc = accounts.find(
+        a => a.name === 'B'
+      );
+      const result =
+        await downloadAndPrepareCSV(
+          browser,
+          currentAcc
+        );
       await executePvSet(
         result.page,
-        acc,
+        currentAcc,
         result.processed
       );
       await result.context.close();
@@ -1092,18 +1202,28 @@ async function executePvSet(page, acc, processed) {
       '次回のスケジュール枠でも同じタスクを再実行します。: ' +
       err.message
     );
+    await sendChatworkError(
+      currentState,
+      currentAcc,
+      err
+    );
     process.exitCode = 1;
   } finally {
     await browser.close();
     if (succeeded) {
-      counterData.count = (index + 1) % rotation.length;
+      counterData.count =
+        (index + 1) % rotation.length;
     } else {
       counterData.count = index;
     }
     try {
       fs.writeFileSync(
         counterPath,
-        JSON.stringify(counterData, null, 2),
+        JSON.stringify(
+          counterData,
+          null,
+          2
+        ),
         'utf8'
       );
       console.log(
@@ -1116,14 +1236,25 @@ async function executePvSet(page, acc, processed) {
       );
     }
   }
-})().catch(error => {
-  console.error('[実行中断] ' + safeLog(error.message));
+})().catch(async error => {
+  console.error(
+    '[実行中断] ' +
+    safeLog(error.message)
+  );
   for (const acc of accounts) {
     if (acc.logStage) {
       console.error(
-        '[最終工程] ' + acc.name + ' / ' + acc.logStage
+        '[最終工程] ' +
+        acc.name +
+        ' / ' +
+        acc.logStage
       );
     }
   }
+  await sendChatworkError(
+    '実行中断',
+    null,
+    error
+  );
   process.exitCode = 1;
 });
