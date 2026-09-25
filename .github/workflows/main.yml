@@ -1,43 +1,77 @@
 name: Job Automation Run
+
 permissions:
   contents: write
+
 on:
   workflow_dispatch:
   schedule:
     - cron: '0 */6 * * *'
+
+# 6時間ごとの次回実行と重ならないよう、同じ自動処理は常に1本だけ実行。
+# 実行中の処理を途中キャンセルすると取出予約だけ残る可能性があるため cancel-in-progress は false。
+concurrency:
+  group: hitomgr-production
+  cancel-in-progress: false
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    # 次の6時間枠より十分前に終了させる。main.js側はCSV生成を最大120分監視。
+    timeout-minutes: 330
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
-          # カウンターをPushするために書き込み権限付きでチェックアウトします
           token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
+
       - name: Install dependencies
         run: npm ci || npm install
+
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps chromium
+
       - name: Run Automation Script
         env:
           HITOMGR_ID_M003: ${{ secrets.HITOMGR_ID_M003 }}
           HITOMGR_PASSWORD_PASSU003: ${{ secrets.HITOMGR_PASSWORD_PASSU003 }}
           HITOMGR_ID_U003: ${{ secrets.HITOMGR_ID_U003 }}
-        # 実行するJSファイル名に合わせて main.js に修正しました
+          CHATWORK_API_TOKEN: ${{ secrets.CHATWORK_API_TOKEN }}
         run: node main.js
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hitomgr-error-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            error_prepare_*.png
+            *_raw_data.csv
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Save counter
-        # ★修正: 直前のステップが失敗(exitCode=1)しても、
-        # counter.jsonの更新・pushを必ず実行するようにする
         if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add counter.json
-          git commit -m "🤖 [Automated] update counter" || exit 0
-          git pull --rebase origin ${{ github.ref }} || true
-          git push origin HEAD:${{ github.ref }}
+          if git diff --cached --quiet; then
+            echo "counter.json に変更なし"
+            exit 0
+          fi
+          git commit -m "🤖 [Automated] update counter"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && exit 0
+            echo "counter push retry $i/3"
+            sleep $((i * 10))
+          done
+          echo "counter.json のpushに失敗"
+          exit 1
