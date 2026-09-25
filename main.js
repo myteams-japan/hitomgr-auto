@@ -1024,6 +1024,65 @@ async function downloadTargetCSVWithRetry(
   }
 }
 
+async function findReusableExport(page, acc, historySegment) {
+  try {
+    await navigateViaMenuOrUrl(
+      page,
+      acc,
+      '取出ファイル一覧',
+      historySegment
+    );
+
+    const pathname = new URL(page.url()).pathname;
+    if (!pathname.includes('/' + historySegment)) {
+      return false;
+    }
+
+    const rows = await page.locator('table tbody tr').evaluateAll(rows =>
+      rows.map(row => {
+        const cells = Array.from(row.querySelectorAll('td'));
+        return {
+          date: cells[0] ? cells[0].innerText.trim() : '',
+          status: cells[2] ? cells[2].innerText.replace(/\s+/g, ' ').trim() : ''
+        };
+      })
+    );
+
+    const nowKey = Number(
+      new Date(Date.now() + 9 * 60 * 60 * 1000)
+        .toISOString().slice(0, 19).replace(/\D/g, '')
+    );
+
+    const reusable = rows
+      .map(row => ({ ...row, key: exportDateKey(row.date) }))
+      .filter(row => {
+        if (!row.key) return false;
+        const ageSeconds = nowKey - Number(row.key);
+        return ageSeconds >= 0 &&
+          ageSeconds <= 60000 &&
+          /待機中|進行中|出力中|完了|取出完了|取出し完了|出力完了/.test(row.status);
+      })
+      .sort((a, b) => b.key.localeCompare(a.key))[0];
+
+    if (!reusable) {
+      return false;
+    }
+
+    acc.exportRequestKey = reusable.key;
+    acc.exportRequestedAfter = reusable.key;
+    acc.exportMissingCount = 0;
+    console.log(
+      `♻️ 【${acc.name}】直近の既存取出予約を再利用します: ${reusable.key} / ${reusable.status}`
+    );
+    return true;
+  } catch (error) {
+    console.warn(
+      `⚠️ 【${acc.name}】既存取出予約の確認に失敗: ${safeLog(error.message)}`
+    );
+    return false;
+  }
+}
+
 async function downloadAndPrepareCSV(browser, acc) {
   logStage(acc, 'ブラウザ画面作成');
   const context = await browser.newContext({
@@ -1134,43 +1193,68 @@ async function downloadAndPrepareCSV(browser, acc) {
         (loginLastError ? ' 最終エラー: ' + safeLog(loginLastError.message) : '')
       );
     }
-    logStage(acc, '募集一覧へ移動');
-    const recruitUrl = acc.url.replace(
-      '/login/',
-      '/rec_recruitments'
-    );
-    await page.goto(recruitUrl, {
-      waitUntil: 'networkidle'
-    });
-    logStage(acc, 'CSV取出予約');
-    const exportBtn = page.locator(
-      'a:has-text("ファイル取出予約"), ' +
-      'button:has-text("ファイル取出予約")'
-    ).first();
-    await exportBtn.waitFor({
-      state: 'visible',
-      timeout: 30000
-    });
-    acc.exportRequestKey = null;
-    acc.exportMissingCount = 0;
-    acc.exportRequestedAfter = new Date(
-      Date.now() - 60000 + 9 * 60 * 60 * 1000
-    ).toISOString().slice(0, 19).replace(/\D/g, '');
-    await exportBtn.click({ force: true });
-    console.log(
-      `✅ 【${acc.name}】ファイル取出予約を1回クリックしました。`
-    );
-    await page.waitForTimeout(3000);
     const historySegment = acc.name === 'B'
       ? 'csv_export_queues'
       : 'rec_export_histories';
-    logStage(acc, '取出ファイル一覧へ移動');
-    await navigateViaMenuOrUrl(
+
+    // 再実行時に二重予約を作らないため、まず直近の既存予約を探す。
+    logStage(acc, '既存CSV取出予約の確認');
+    acc.exportRequestKey = null;
+    acc.exportMissingCount = 0;
+    const reused = await findReusableExport(
       page,
       acc,
-      '取出ファイル一覧',
       historySegment
     );
+
+    if (!reused) {
+      logStage(acc, '募集一覧へ移動');
+      const recruitUrl = acc.url.replace(
+        '/login/',
+        '/rec_recruitments'
+      );
+      await page.goto(recruitUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
+
+      logStage(acc, 'CSV取出予約');
+      const exportBtn = page.locator(
+        'a:has-text("ファイル取出予約"), ' +
+        'button:has-text("ファイル取出予約")'
+      ).first();
+      await exportBtn.waitFor({
+        state: 'visible',
+        timeout: 30000
+      });
+
+      acc.exportRequestedAfter = new Date(
+        Date.now() - 60000 + 9 * 60 * 60 * 1000
+      ).toISOString().slice(0, 19).replace(/\D/g, '');
+
+      await exportBtn.click({ force: true });
+      console.log(
+        `✅ 【${acc.name}】新規ファイル取出予約を1回だけクリックしました。`
+      );
+      await page.waitForTimeout(3000);
+
+      logStage(acc, '取出ファイル一覧へ移動');
+      await navigateViaMenuOrUrl(
+        page,
+        acc,
+        '取出ファイル一覧',
+        historySegment
+      );
+    } else {
+      logStage(acc, '既存取出予約を継続');
+    }
+
+    const historyPath = new URL(page.url()).pathname;
+    if (!historyPath.includes('/' + historySegment)) {
+      throw new Error(
+        `取出ファイル一覧へ移動できていないため処理を停止します: ${historyPath}`
+      );
+    }
     const maxWaitMs = 120 * 60 * 1000;
     const checkIntervalMs = 10000;
     const monitorStart = Date.now();
