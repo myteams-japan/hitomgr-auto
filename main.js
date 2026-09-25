@@ -554,52 +554,114 @@ function exportDateKey(text) {
 }
 
 async function restoreExportSession(page, acc) {
-  const password = page
-    .locator('input[type="password"]')
-    .first();
+  const password = page.locator('input[type="password"]').first();
   if (!(await password.isVisible().catch(() => false))) {
     return false;
   }
+
   logStage(acc, 'ログイン切れからの再認証');
   if (!acc.id || !acc.password) {
     throw new Error('再ログイン用の認証設定がありません。');
   }
+
   console.log(
     `🔐 【${acc.name}】ログイン画面を検出。同じ予約の監視を再開します。`
   );
-  await page.locator(
-    'input[type="text"], input[type="email"], input[name*="login"]'
-  ).first().fill(acc.id, {
-    timeout: 30000
-  });
-  await password.fill(acc.password, {
-    timeout: 30000
-  });
-  await page.locator(
-    'button, input[type="submit"], .btn, a:has-text("ログイン")'
-  ).first().click({
-    timeout: 30000
-  });
-  await page.waitForLoadState('domcontentloaded', {
-    timeout: 30000
-  });
+
+  const loginUrl = acc.url;
   const history = acc.name === 'B'
     ? 'csv_export_queues'
     : 'rec_export_histories';
-  await page.goto(
-    acc.url.replace('/login/', '/' + history),
-    {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000
+  const historyUrl = acc.url.replace('/login/', '/' + history);
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      if (!page.url().includes('/session/new') && !page.url().includes('/login')) {
+        await page.goto(loginUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000
+        }).catch(() => {});
+      }
+
+      const pass = page.locator('input[type="password"]').first();
+      await pass.waitFor({ state: 'visible', timeout: 30000 });
+
+      const user = page.locator(
+        'input[type="text"], input[type="email"], input[name*="login"], input[name*="user"], input[name*="id"]'
+      ).first();
+
+      await user.fill(acc.id, { timeout: 30000 });
+      await pass.fill(acc.password, { timeout: 30000 });
+
+      const submit = page.locator(
+        'button[type="submit"], input[type="submit"], button:has-text("ログイン"), a:has-text("ログイン")'
+      ).first();
+
+      await Promise.all([
+        page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
+        submit.click({ force: true, timeout: 30000 })
+      ]);
+
+      await page.waitForTimeout(3000);
+
+      const stillLogin = await page.locator('input[type="password"]')
+        .first().isVisible().catch(() => false);
+
+      if (stillLogin) {
+        const bodyText = await page.locator('body').innerText().catch(() => '');
+        const authRejected = /認証|ログイン.*失敗|ID.*パスワード|パスワード.*(違|誤)|アカウント.*(ロック|無効)/i.test(bodyText);
+        if (authRejected) {
+          throw new Error(
+            'ヒトマネ側でIDまたはパスワードが拒否されました。GitHub Secretsの認証情報確認が必要です。'
+          );
+        }
+        throw new Error('ログイン送信後もログイン画面のままです。');
+      }
+
+      await page.goto(historyUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
+      await page.waitForTimeout(2000);
+
+      const redirectedToLogin = await page.locator('input[type="password"]')
+        .first().isVisible().catch(() => false);
+
+      if (redirectedToLogin) {
+        throw new Error('一覧へ移動すると再びログイン画面へ戻りました。');
+      }
+
+      logStage(acc, '再認証成功・同じ予約の監視再開');
+      return true;
+    } catch (error) {
+      lastError = error;
+      console.warn(
+        `⚠️ 【${acc.name}】再ログイン試行 ${attempt}/5 失敗: ${safeLog(error.message)}`
+      );
+
+      if (/IDまたはパスワードが拒否/.test(error.message)) {
+        throw error;
+      }
+
+      if (attempt < 5) {
+        const waitMs = attempt * 15000;
+        console.log(
+          `⏳ 【${acc.name}】${waitMs / 1000}秒後に再ログインします。`
+        );
+        await page.waitForTimeout(waitMs);
+        await page.goto(loginUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000
+        }).catch(() => {});
+      }
     }
-  );
-  if (await password.isVisible().catch(() => false)) {
-    throw new Error(
-      '再ログインに失敗しました。認証設定を確認してください。'
-    );
   }
-  logStage(acc, '再認証成功・同じ予約の監視再開');
-  return true;
+
+  throw new Error(
+    '再ログインを5回試行しましたが成功しませんでした。' +
+    (lastError ? ' 最終エラー: ' + safeLog(lastError.message) : '')
+  );
 }
 
 async function getLatestExportStatus(page, acc) {
