@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+// manual run trigger 2026-09-25T01:56:10.744Z
 const fs = require('fs');
 const path = require('path');
 const iconv = require('iconv-lite');
