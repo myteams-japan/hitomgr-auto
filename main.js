@@ -638,7 +638,20 @@ async function restoreExportSession(page, acc) {
 
       // ログイン後はトップ画面の「取出ファイル一覧」から既存予約一覧へ戻る。
       // ここでは「ファイル取出予約」は絶対に押さない。
-      const historyLink = page.locator('a:has-text("取出ファイル一覧")').first();
+      // トップ画面では矢印アイコンを開くと「取出ファイル一覧」が表示される。
+      // まず矢印メニューを開き、そこから既存の取出一覧へ戻る。
+      let historyLink = page.locator('a:has-text("取出ファイル一覧")').first();
+      if (!(await historyLink.isVisible().catch(() => false))) {
+        const arrowMenu = page.locator(
+          'ul.nav-tabs li:nth-child(5), li:has(.fa-share), li:has(.fa-mail-forward), li:has(.fa-reply), a:has(img)'
+        ).first();
+        if (await arrowMenu.count() > 0) {
+          await arrowMenu.hover().catch(() => {});
+          await arrowMenu.click({ force: true, timeout: 10000 }).catch(() => {});
+          await page.waitForTimeout(1000);
+          historyLink = page.locator('a:has-text("取出ファイル一覧")').first();
+        }
+      }
       if (await historyLink.isVisible().catch(() => false)) {
         await historyLink.click({ force: true, timeout: 15000 });
         await page.waitForLoadState('domcontentloaded', {
