@@ -394,12 +394,29 @@ async function navigateViaMenuOrUrl(
     }
   } catch (err) {
   }
+  // メニューに「取出ファイル一覧」が見えている場合は画面操作を優先する。
+  // 再ログイン後も新しい取出予約は作らず、既存の予約一覧へ戻る。
+  try {
+    const directMenuLink = page.locator(
+      'a:has-text("取出ファイル一覧")'
+    ).filter({ visible: true }).first();
+    if (await directMenuLink.isVisible().catch(() => false)) {
+      await directMenuLink.click({ force: true, timeout: 15000 });
+      await page.waitForLoadState('domcontentloaded', {
+        timeout: 30000
+      }).catch(() => {});
+      await page.waitForTimeout(1500);
+      return;
+    }
+  } catch (_) {}
+
   const destinationUrl = acc.url.replace(
     '/login/',
     `/${targetUrlSegment}`
   );
   await page.goto(destinationUrl, {
-    waitUntil: 'networkidle'
+    waitUntil: 'domcontentloaded',
+    timeout: 60000
   }).catch(() => {});
   await page.waitForTimeout(1500);
 }
@@ -619,10 +636,20 @@ async function restoreExportSession(page, acc) {
         throw new Error('ログイン送信後もログイン画面のままです。');
       }
 
-      await page.goto(historyUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 60000
-      });
+      // ログイン後はトップ画面の「取出ファイル一覧」から既存予約一覧へ戻る。
+      // ここでは「ファイル取出予約」は絶対に押さない。
+      const historyLink = page.locator('a:has-text("取出ファイル一覧")').first();
+      if (await historyLink.isVisible().catch(() => false)) {
+        await historyLink.click({ force: true, timeout: 15000 });
+        await page.waitForLoadState('domcontentloaded', {
+          timeout: 30000
+        }).catch(() => {});
+      } else {
+        await page.goto(historyUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000
+        });
+      }
       await page.waitForTimeout(2000);
 
       const redirectedToLogin = await page.locator('input[type="password"]')
