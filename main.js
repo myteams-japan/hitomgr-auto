@@ -972,20 +972,86 @@ async function downloadAndPrepareCSV(browser, acc) {
   });
   try {
     logStage(acc, 'ログイン');
-    await page.goto(acc.url, {
-      waitUntil: 'networkidle'
-    });
-    await page.locator(
-      'input[type="text"], input[type="email"], input[name*="login"]'
-    ).first().fill(acc.id);
-    await page.locator('input[type="password"]')
-      .first()
-      .fill(acc.password);
-    await page.locator(
-      'button, input[type="submit"], .btn, a:has-text("ログイン")'
-    ).first().click();
-    await page.waitForLoadState('networkidle')
-      .catch(() => {});
+    let loginSucceeded = false;
+    let loginLastError = null;
+    for (let loginAttempt = 1; loginAttempt <= 12; loginAttempt++) {
+      try {
+        console.log(
+          `🔐 【${acc.name}】初回ログイン試行 ${loginAttempt}/12`
+        );
+        const response = await page.goto(acc.url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000
+        });
+
+        const status = response ? response.status() : 0;
+        if ([429, 502, 503, 504].includes(status)) {
+          throw new Error(`ログインページ一時障害 HTTP ${status}`);
+        }
+
+        const userInput = page.locator(
+          'input[type="text"], input[type="email"], input[name*="login"], input[name*="user"], input[name*="id"]'
+        ).first();
+        const passInput = page.locator('input[type="password"]').first();
+
+        await userInput.waitFor({ state: 'visible', timeout: 30000 });
+        await passInput.waitFor({ state: 'visible', timeout: 30000 });
+        await userInput.fill(acc.id, { timeout: 30000 });
+        await passInput.fill(acc.password, { timeout: 30000 });
+
+        const submit = page.locator(
+          'button[type="submit"], input[type="submit"], button:has-text("ログイン"), a:has-text("ログイン")'
+        ).first();
+        await submit.click({ force: true, timeout: 30000 });
+        await page.waitForLoadState('domcontentloaded', {
+          timeout: 30000
+        }).catch(() => {});
+        await page.waitForTimeout(2500);
+
+        const stillLogin = await page.locator('input[type="password"]')
+          .first().isVisible().catch(() => false);
+        if (stillLogin) {
+          const bodyText = await page.locator('body').innerText().catch(() => '');
+          if (/認証|ログイン.*失敗|ID.*パスワード|パスワード.*(違|誤)|アカウント.*(ロック|無効)/i.test(bodyText)) {
+            throw new Error(
+              'ヒトマネ側でIDまたはパスワードが拒否されました。GitHub Secretsの認証情報確認が必要です。'
+            );
+          }
+          throw new Error('ログイン送信後もログイン画面のままです。');
+        }
+
+        loginSucceeded = true;
+        console.log(`✅ 【${acc.name}】ログイン成功。`);
+        break;
+      } catch (loginError) {
+        loginLastError = loginError;
+        console.warn(
+          `⚠️ 【${acc.name}】初回ログイン失敗 ${loginAttempt}/12: ${safeLog(loginError.message)}`
+        );
+
+        if (/IDまたはパスワードが拒否/.test(loginError.message)) {
+          throw loginError;
+        }
+
+        if (loginAttempt < 12) {
+          const waitMs = Math.min(
+            120000,
+            15000 * Math.pow(1.35, loginAttempt - 1)
+          );
+          console.log(
+            `⏳ 【${acc.name}】ヒトマネ側の復旧を${Math.round(waitMs / 1000)}秒待って再ログインします。`
+          );
+          await page.waitForTimeout(waitMs);
+        }
+      }
+    }
+
+    if (!loginSucceeded) {
+      throw new Error(
+        '初回ログインを12回試行しましたが成功しませんでした。' +
+        (loginLastError ? ' 最終エラー: ' + safeLog(loginLastError.message) : '')
+      );
+    }
     logStage(acc, '募集一覧へ移動');
     const recruitUrl = acc.url.replace(
       '/login/',
