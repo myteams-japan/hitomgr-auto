@@ -866,6 +866,22 @@ async function downloadTargetCSVWithRetry(
           120000,
           baseWaitMs * Math.pow(1.35, attempt - 1)
         );
+
+        // 503等が連続する場合は、同じセッションで待ち続けず
+        // ログイン画面からセッションを作り直す。ただし取出予約は新規作成しない。
+        if (attempt >= 3 && attempt % 3 === 0) {
+          console.log(
+            `🔄 【${acc.name}】HTTP ${status}が連続したためログイン画面からセッションを作り直します。同じ予約=${acc.exportRequestKey || '未取得'}を継続します。`
+          );
+          await page.context().clearCookies().catch(() => {});
+          await page.goto(acc.url, {
+            waitUntil: 'domcontentloaded',
+            timeout: 60000
+          }).catch(() => {});
+          await restoreExportSession(page, acc);
+          await page.waitForTimeout(5000);
+        }
+
         console.log(
           `⏳ 【${acc.name}】ヒトマネ側CSV準備中/一時障害 HTTP ${status}。` +
           `${Math.round(waitMs / 1000)}秒後に同じ予約を再試行します。`
