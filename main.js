@@ -759,7 +759,7 @@ async function downloadTargetCSVWithRetry(
   downloadPath,
   historySegment
 ) {
-  const maxAttempts = 5;
+  const maxAttempts = 12;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(
       `⬇️ 【${acc.name}】CSVダウンロード試行 ${attempt}/${maxAttempts}`
