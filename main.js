@@ -370,55 +370,81 @@ async function navigateViaMenuOrUrl(
   targetText,
   targetUrlSegment
 ) {
-  try {
-    const menuHoverIcon = page.locator(
-      'li:has(a:has-text("面接カレンダー")) + li, ' +
-      'ul.nav-tabs li:nth-child(5), ' +
-      '.nav-tabs li a:has(img), li:has(.fa-refresh)'
-    ).first();
-    if (await menuHoverIcon.count() > 0) {
-      await menuHoverIcon.hover();
-      await page.waitForTimeout(1000);
-      const subMenuLink = page
-        .locator(`a:has-text("${targetText}")`)
-        .first();
-      if (
-        await subMenuLink.count() > 0 &&
-        await subMenuLink.isVisible()
-      ) {
-        await subMenuLink.click();
-        await page.waitForLoadState('networkidle')
-          .catch(() => {});
-        return;
-      }
-    }
-  } catch (err) {
-  }
-  // メニューに「取出ファイル一覧」が見えている場合は画面操作を優先する。
-  // 再ログイン後も新しい取出予約は作らず、既存の予約一覧へ戻る。
-  try {
-    const directMenuLink = page.locator(
-      'a:has-text("取出ファイル一覧")'
-    ).filter({ visible: true }).first();
-    if (await directMenuLink.isVisible().catch(() => false)) {
-      await directMenuLink.click({ force: true, timeout: 15000 });
-      await page.waitForLoadState('domcontentloaded', {
-        timeout: 30000
-      }).catch(() => {});
-      await page.waitForTimeout(1500);
-      return;
-    }
-  } catch (_) {}
-
   const destinationUrl = acc.url.replace(
     '/login/',
     `/${targetUrlSegment}`
   );
+
+  // B側は矢印メニューを開いて「取出ファイル一覧」を選ぶ必要がある。
+  // メニュー操作が成功したように見えてもURLが一覧になっていなければ成功扱いしない。
+  try {
+    let targetLink = page.locator(`a:has-text("${targetText}")`).first();
+
+    if (!(await targetLink.isVisible().catch(() => false))) {
+      const arrowCandidates = [
+        'ul.nav-tabs li:nth-child(5)',
+        'li:has(.fa-share)',
+        'li:has(.fa-mail-forward)',
+        'li:has(.fa-reply)',
+        '.nav-tabs li a:has(img)'
+      ];
+
+      for (const selector of arrowCandidates) {
+        const arrow = page.locator(selector).first();
+        if (!(await arrow.isVisible().catch(() => false))) continue;
+
+        await arrow.hover().catch(() => {});
+        await arrow.click({ force: true, timeout: 10000 }).catch(() => {});
+        await page.waitForTimeout(1000);
+
+        targetLink = page.locator(`a:has-text("${targetText}")`).first();
+        if (await targetLink.isVisible().catch(() => false)) break;
+      }
+    }
+
+    if (await targetLink.isVisible().catch(() => false)) {
+      await targetLink.click({ force: true, timeout: 15000 });
+      await page.waitForLoadState('domcontentloaded', {
+        timeout: 30000
+      }).catch(() => {});
+      await page.waitForTimeout(1500);
+
+      if (new URL(page.url()).pathname.includes('/' + targetUrlSegment)) {
+        console.log(
+          `✅ 【${acc.name}】${targetText}へ移動成功: ${new URL(page.url()).pathname}`
+        );
+        return;
+      }
+
+      console.warn(
+        `⚠️ 【${acc.name}】メニュークリック後も一覧画面ではありません: ${new URL(page.url()).pathname}`
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `⚠️ 【${acc.name}】${targetText}のメニュー操作失敗: ${safeLog(err.message)}`
+    );
+  }
+
+  // メニュー操作が失敗した場合のみ既知URLへ直接移動。
   await page.goto(destinationUrl, {
     waitUntil: 'domcontentloaded',
     timeout: 60000
-  }).catch(() => {});
+  });
+
+  await restoreExportSession(page, acc);
   await page.waitForTimeout(1500);
+
+  const pathname = new URL(page.url()).pathname;
+  if (!pathname.includes('/' + targetUrlSegment)) {
+    throw new Error(
+      `${targetText}へ移動できませんでした。現在の画面: ${pathname}`
+    );
+  }
+
+  console.log(
+    `✅ 【${acc.name}】${targetText}へ直接移動成功: ${pathname}`
+  );
 }
 
 async function uploadSingleFileOnly(
