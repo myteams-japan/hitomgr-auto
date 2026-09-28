@@ -889,86 +889,89 @@ async function downloadTargetCSVWithRetry(
   historySegment
 ) {
   const maxAttempts = 8;
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(
-      `⬇️ 【${acc.name}】CSVダウンロード試行 ${attempt}/${maxAttempts}`
+      `⬇️ 【${acc.name}】管理画面からCSVダウンロード試行 ${attempt}/${maxAttempts}`
     );
     try {
-      if (attempt > 1) {
-        await page.goto(
-          acc.url.replace('/login/', '/' + historySegment),
-          {
-            waitUntil: 'domcontentloaded',
-            timeout: 60000
-          }
+      // download URLを直接開かない。
+      // 毎回、ログイン済み管理画面 → 取出ファイル一覧 → 対象行のリンク、の順で操作する。
+      await navigateViaMenuOrUrl(
+        page,
+        acc,
+        '取出ファイル一覧',
+        historySegment
+      );
+      await page.waitForTimeout(2000);
+
+      const target = await getLatestExportStatus(page, acc);
+      if (target.status !== '完了' || !target.row) {
+        throw new Error(
+          `対象予約が完了状態ではありません: ${target.status}`
         );
-        await restoreExportSession(page, acc);
-        await page.waitForTimeout(3000);
       }
+
       const downloadLink = await findDownloadLink(page, acc);
       if (!downloadLink) {
         throw new Error(
-          '完成済み対象予約のダウンロードリンクを取得できませんでした。'
+          '取出ファイル一覧の対象行からCSVリンクを取得できませんでした。'
         );
       }
-      // 通常クリックで503になる場合があるため、リンクを新しいタブ/画面遷移させず
-      // ブラウザDOM上のリンクを使って実ダウンロードを発火する。
+
       const downloadPromise = page.waitForEvent('download', {
         timeout: 120000
       });
 
-      const href = await downloadLink.getAttribute('href');
-      if (!href) {
-        throw new Error('CSVダウンロードリンクのhrefを取得できませんでした。');
-      }
-
-      // サーバーがダウンロードリンクに必要とするRefererを維持したまま、
-      // 実ブラウザのクリックとして発火する。
-      await downloadLink.evaluate(el => {
-        el.setAttribute('target', '_self');
-        el.click();
+      // 管理画面に表示されているリンクを、その画面上で通常クリックする。
+      await downloadLink.click({
+        timeout: 30000
       });
 
       const download = await downloadPromise;
-      const downloadFailure = await download.failure();
-      if (downloadFailure) {
-        throw new Error(
-          'ダウンロード失敗: ' + downloadFailure
-        );
+      const failure = await download.failure();
+      if (failure) {
+        throw new Error('ブラウザダウンロード失敗: ' + failure);
       }
+
       await download.saveAs(downloadPath);
-      if (!fs.existsSync(downloadPath)) {
-        throw new Error(
-          'ダウンロード後のCSVファイルを確認できませんでした。'
-        );
-      }
       const stat = fs.statSync(downloadPath);
       if (stat.size <= 0) {
-        throw new Error(
-          'ダウンロードしたCSVファイルが空です。'
-        );
+        throw new Error('ダウンロードしたCSVファイルが空です。');
       }
+
       console.log(
-        `✅ 【${acc.name}】RAWデータのダウンロード・保存成功。`
+        `✅ 【${acc.name}】管理画面の取出ファイル一覧からCSV取得成功（${stat.size} bytes）。`
       );
       return;
     } catch (error) {
       console.warn(
-        `⚠️ 【${acc.name}】CSVダウンロード失敗（${attempt}/${maxAttempts}）: ${safeLog(error.message)}`
+        `⚠️ 【${acc.name}】管理画面からのCSV取得失敗（${attempt}/${maxAttempts}）: ${safeLog(error.message)}`
       );
       if (attempt >= maxAttempts) {
         throw new Error(
-          `CSVダウンロードを${maxAttempts}回試行しましたが成功しませんでした。予約=${acc.exportRequestKey || '未取得'} / ${safeLog(error.message)}`
+          `管理画面からのCSV取得を${maxAttempts}回試行しましたが成功しませんでした。予約=${acc.exportRequestKey || '未取得'} / ${safeLog(error.message)}`
         );
       }
-      console.log(
-        `⏳ 【${acc.name}】30秒待機して同じ予約=${acc.exportRequestKey || '未取得'}を再試行します。`
-      );
+
+      // 3回失敗したら管理画面ログインから作り直す。
+      // 新規のファイル取出予約は作らず、同じ予約を一覧から再取得する。
+      if (attempt % 3 === 0) {
+        console.log(
+          `🔄 【${acc.name}】管理画面へ再ログインし、同じ予約=${acc.exportRequestKey || '未取得'}を取出ファイル一覧から再取得します。`
+        );
+        await page.context().clearCookies().catch(() => {});
+        await page.goto(acc.url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 60000
+        }).catch(() => {});
+        await restoreExportSession(page, acc);
+      }
+
       await page.waitForTimeout(30000);
     }
   }
 }
-
 
 async function findReusableExport(page, acc, historySegment) {
   try {
