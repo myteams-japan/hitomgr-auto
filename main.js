@@ -911,13 +911,24 @@ async function downloadTargetCSVWithRetry(
           '完成済み対象予約のダウンロードリンクを取得できませんでした。'
         );
       }
+      // 通常クリックで503になる場合があるため、リンクを新しいタブ/画面遷移させず
+      // ブラウザDOM上のリンクを使って実ダウンロードを発火する。
       const downloadPromise = page.waitForEvent('download', {
         timeout: 120000
       });
-      await downloadLink.click({
-        force: true,
-        timeout: 60000
+
+      const href = await downloadLink.getAttribute('href');
+      if (!href) {
+        throw new Error('CSVダウンロードリンクのhrefを取得できませんでした。');
+      }
+
+      // サーバーがダウンロードリンクに必要とするRefererを維持したまま、
+      // 実ブラウザのクリックとして発火する。
+      await downloadLink.evaluate(el => {
+        el.setAttribute('target', '_self');
+        el.click();
       });
+
       const download = await downloadPromise;
       const downloadFailure = await download.failure();
       if (downloadFailure) {
