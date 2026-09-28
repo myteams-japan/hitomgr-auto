@@ -363,7 +363,6 @@ function processCSVFile(filePath, accountName) {
     pv: pvFiles
   };
 }
-
 async function navigateViaMenuOrUrl(
   page,
   acc,
@@ -726,7 +725,6 @@ async function restoreExportSession(page, acc) {
     (lastError ? ' 最終エラー: ' + safeLog(lastError.message) : '')
   );
 }
-
 async function getLatestExportStatus(page, acc) {
   await restoreExportSession(page, acc);
   await page.locator('table tbody tr td').first().waitFor({
@@ -879,93 +877,127 @@ async function findDownloadLink(page, acc) {
   return null;
 }
 
-async function downloadTargetCSVWithRetry(
-  page,
-  acc,
-  downloadPath,
-  historySegment
-) {
-  const maxAttempts = 8;
+function describeHeaders(h) {
+  return ['server', 'via', 'x-cache', 'cf-ray', 'retry-after', 'content-type', 'content-length']
+    .filter(k => h && h[k]).map(k => `${k}=${h[k]}`).join(' / ');
+}
 
+async function downloadViaRequest(page, acc, url, listUrl, downloadPath) {
+  const res = await page.context().request.get(url, {
+    headers: { Referer: listUrl },
+    timeout: 600000
+  });
+  const headers = res.headers();
+  console.log(`📡 【${acc.name}】直接取得の応答: HTTP ${res.status()} / ${describeHeaders(headers)}`);
+  if (!res.ok()) {
+    let snippet = '';
+    try { snippet = (await res.text()).replace(/\s+/g, ' ').slice(0, 200); } catch {}
+    const err = new Error(`直接取得 HTTP ${res.status()} ${snippet}`);
+    err.httpStatus = res.status();
+    err.waitMs = Math.min(Number(headers['retry-after']) || 0, 300) * 1000;
+    throw err;
+  }
+  if (/text\/html/i.test(headers['content-type'] || '')) {
+    throw new Error('直接取得の応答がHTMLでした（ログイン切れの可能性）');
+  }
+  const body = await res.body();
+  fs.writeFileSync(downloadPath, body);
+  return body.length;
+}
+
+async function downloadViaClick(page, acc, link, downloadPath) {
+  let bad = null;
+  const onRes = r => {
+    if (r.url().includes('/download/') && r.status() >= 400) bad = r;
+  };
+  page.on('response', onRes);
+  let stop = false;
+  try {
+    const dl = page.waitForEvent('download', { timeout: 120000 });
+    dl.catch(() => {});
+    await link.click({ timeout: 30000 });
+    const failFast = (async () => {
+      while (!stop) {
+        if (bad) {
+          console.log(`📡 【${acc.name}】クリック取得の応答: HTTP ${bad.status()} / ${describeHeaders(bad.headers())}`);
+          const err = new Error(`クリック取得 HTTP ${bad.status()}`);
+          err.httpStatus = bad.status();
+          throw err;
+        }
+        await new Promise(r => setTimeout(r, 300));
+      }
+    })();
+    const download = await Promise.race([dl, failFast]);
+    stop = true;
+    const failure = await download.failure();
+    if (failure) throw new Error('ブラウザダウンロード失敗: ' + failure);
+    await download.saveAs(downloadPath);
+    return fs.statSync(downloadPath).size;
+  } finally {
+    stop = true;
+    page.off('response', onRes);
+  }
+}
+
+async function downloadTargetCSVWithRetry(page, acc, downloadPath, historySegment) {
+  const maxAttempts = 6;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    console.log(
-      `⬇️ 【${acc.name}】管理画面からCSVダウンロード試行 ${attempt}/${maxAttempts}`
-    );
+    console.log(`⬇️ 【${acc.name}】CSVダウンロード試行 ${attempt}/${maxAttempts}`);
+    let waitExtra = 0;
     try {
-      // download URLを直接開かない。
-      // 毎回、ログイン済み管理画面 → 取出ファイル一覧 → 対象行のリンク、の順で操作する。
-      await navigateViaMenuOrUrl(
-        page,
-        acc,
-        '取出ファイル一覧',
-        historySegment
-      );
+      await navigateViaMenuOrUrl(page, acc, '取出ファイル一覧', historySegment);
       await page.waitForTimeout(2000);
 
       const target = await getLatestExportStatus(page, acc);
       if (target.status !== '完了' || !target.row) {
-        throw new Error(
-          `対象予約が完了状態ではありません: ${target.status}`
-        );
+        throw new Error(`対象予約が完了状態ではありません: ${target.status}`);
       }
+      const link = await findDownloadLink(page, acc);
+      if (!link) throw new Error('対象行のCSVリンクを取得できませんでした。');
 
-      const downloadLink = await findDownloadLink(page, acc);
-      if (!downloadLink) {
-        throw new Error(
-          '取出ファイル一覧の対象行からCSVリンクを取得できませんでした。'
-        );
+      const href = await link.getAttribute('href').catch(() => null);
+      const listUrl = page.url();
+      const errors = [];
+      let size = 0;
+
+      // 方式1: Cookieを使った直接取得
+      if (href) {
+        try {
+          size = await downloadViaRequest(page, acc, new URL(href, listUrl).toString(), listUrl, downloadPath);
+        } catch (e) {
+          errors.push(e);
+          console.warn(`⚠️ 【${acc.name}】直接取得に失敗: ${safeLog(e.message)}`);
+        }
       }
-
-      const downloadPromise = page.waitForEvent('download', {
-        timeout: 120000
-      });
-
-      // 管理画面に表示されているリンクを、その画面上で通常クリックする。
-      await downloadLink.click({
-        timeout: 30000
-      });
-
-      const download = await downloadPromise;
-      const failure = await download.failure();
-      if (failure) {
-        throw new Error('ブラウザダウンロード失敗: ' + failure);
+      // 方式2: クリック（503なら即失敗）
+      if (size <= 0) {
+        try {
+          size = await downloadViaClick(page, acc, link, downloadPath);
+        } catch (e) {
+          errors.push(e);
+          console.warn(`⚠️ 【${acc.name}】クリック取得に失敗: ${safeLog(e.message)}`);
+        }
       }
-
-      await download.saveAs(downloadPath);
-      const stat = fs.statSync(downloadPath);
-      if (stat.size <= 0) {
-        throw new Error('ダウンロードしたCSVファイルが空です。');
+      if (size <= 0) {
+        waitExtra = Math.max(0, ...errors.map(e => e.waitMs || 0));
+        throw new Error(errors.map(e => e.message).join(' | ') || 'CSVが空です。');
       }
-
-      console.log(
-        `✅ 【${acc.name}】管理画面の取出ファイル一覧からCSV取得成功（${stat.size} bytes）。`
-      );
+      console.log(`✅ 【${acc.name}】CSV取得成功（${size} bytes）。`);
       return;
     } catch (error) {
-      console.warn(
-        `⚠️ 【${acc.name}】管理画面からのCSV取得失敗（${attempt}/${maxAttempts}）: ${safeLog(error.message)}`
-      );
+      console.warn(`⚠️ 【${acc.name}】CSV取得失敗（${attempt}/${maxAttempts}）: ${safeLog(error.message)}`);
       if (attempt >= maxAttempts) {
-        throw new Error(
-          `管理画面からのCSV取得を${maxAttempts}回試行しましたが成功しませんでした。予約=${acc.exportRequestKey || '未取得'} / ${safeLog(error.message)}`
-        );
+        throw new Error(`CSV取得を${maxAttempts}回試行しましたが失敗しました。予約=${acc.exportRequestKey || '未取得'} / ${safeLog(error.message)}`);
       }
-
-      // 3回失敗したら管理画面ログインから作り直す。
-      // 新規のファイル取出予約は作らず、同じ予約を一覧から再取得する。
       if (attempt % 3 === 0) {
-        console.log(
-          `🔄 【${acc.name}】管理画面へ再ログインし、同じ予約=${acc.exportRequestKey || '未取得'}を取出ファイル一覧から再取得します。`
-        );
+        console.log(`🔄 【${acc.name}】再ログインして同じ予約を再取得します。`);
         await page.context().clearCookies().catch(() => {});
-        await page.goto(acc.url, {
-          waitUntil: 'domcontentloaded',
-          timeout: 60000
-        }).catch(() => {});
+        await page.goto(acc.url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
         await restoreExportSession(page, acc);
       }
-
-      await page.waitForTimeout(30000);
+      const backoff = Math.max(Math.min(30000 * Math.pow(2, attempt - 1), 300000), waitExtra);
+      console.log(`⏳ 【${acc.name}】${Math.round(backoff / 1000)}秒待って再試行します。`);
+      await page.waitForTimeout(backoff);
     }
   }
 }
@@ -1028,14 +1060,15 @@ async function findReusableExport(page, acc, historySegment) {
     return false;
   }
 }
-
 async function downloadAndPrepareCSV(browser, acc) {
   logStage(acc, 'ブラウザ画面作成');
   const context = await browser.newContext({
-    viewport: {
-      width: 1280,
-      height: 800
-    }
+    viewport: { width: 1280, height: 800 },
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+      '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    locale: 'ja-JP',
+    timezoneId: 'Asia/Tokyo'
   });
   const page = await context.newPage();
   page.setDefaultTimeout(60000);
@@ -1320,7 +1353,6 @@ async function downloadAndPrepareCSV(browser, acc) {
     throw error;
   }
 }
-
 async function executeNormalSet(
   page,
   acc,
