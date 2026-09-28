@@ -1036,9 +1036,13 @@ async function findReusableExport(page, acc, historySegment) {
       .filter(row => {
         if (!row.key) return false;
         const ageSeconds = nowKey - Number(row.key);
+        // 待機中・進行中だけ再利用する。
+        // 完了済みCSVはdownload URLが403/503で壊れたまま残る事例があるため、
+        // 次回Runでは再利用せず新しい取出予約を1回だけ作る。
+        const active = /待機中|進行中|出力中/.test(row.status);
         return ageSeconds >= 0 &&
           ageSeconds <= 60000 &&
-          /待機中|進行中|出力中|完了|取出完了|取出し完了|出力完了/.test(row.status);
+          active;
       })
       .sort((a, b) => b.key.localeCompare(a.key))[0];
 
@@ -1050,7 +1054,7 @@ async function findReusableExport(page, acc, historySegment) {
     acc.exportRequestedAfter = reusable.key;
     acc.exportMissingCount = 0;
     console.log(
-      `♻️ 【${acc.name}】直近の既存取出予約を再利用します: ${reusable.key} / ${reusable.status}`
+      `♻️ 【${acc.name}】進行中の既存取出予約を再利用します: ${reusable.key} / ${reusable.status}`
     );
     return true;
   } catch (error) {
