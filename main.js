@@ -940,64 +940,89 @@ async function downloadViaClick(page, acc, link, downloadPath) {
 }
 
 async function downloadTargetCSVWithRetry(page, acc, downloadPath, historySegment) {
-  const maxAttempts = 6;
+  // 最後にB側で成功したRun #503と同じ基本動作:
+  // 一覧画面のCSVリンクをクリック → 失敗時30秒待機 → 同じ予約を再取得。
+  // API直取得はB側で403/503を繰り返したため使用しない。
+  const maxAttempts = 8;
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    console.log(`⬇️ 【${acc.name}】CSVダウンロード試行 ${attempt}/${maxAttempts}`);
-    let waitExtra = 0;
+    console.log(
+      `⬇️ 【${acc.name}】CSVブラウザダウンロード試行 ${attempt}/${maxAttempts}`
+    );
     try {
-      await navigateViaMenuOrUrl(page, acc, '取出ファイル一覧', historySegment);
+      await navigateViaMenuOrUrl(
+        page,
+        acc,
+        '取出ファイル一覧',
+        historySegment
+      );
       await page.waitForTimeout(2000);
 
       const target = await getLatestExportStatus(page, acc);
       if (target.status !== '完了' || !target.row) {
-        throw new Error(`対象予約が完了状態ではありません: ${target.status}`);
+        throw new Error(
+          `対象予約が完了状態ではありません: ${target.status}`
+        );
       }
+
       const link = await findDownloadLink(page, acc);
-      if (!link) throw new Error('対象行のCSVリンクを取得できませんでした。');
+      if (!link) {
+        throw new Error(
+          '対象行のCSVリンクを取得できませんでした。'
+        );
+      }
 
-      const href = await link.getAttribute('href').catch(() => null);
-      const listUrl = page.url();
-      const errors = [];
-      let size = 0;
+      const downloadPromise = page.waitForEvent('download', {
+        timeout: 60000
+      });
 
-      // 方式1: Cookieを使った直接取得
-      if (href) {
-        try {
-          size = await downloadViaRequest(page, acc, new URL(href, listUrl).toString(), listUrl, downloadPath);
-        } catch (e) {
-          errors.push(e);
-          console.warn(`⚠️ 【${acc.name}】直接取得に失敗: ${safeLog(e.message)}`);
-        }
+      await link.click({
+        force: true,
+        noWaitAfter: true,
+        timeout: 30000
+      });
+
+      const download = await downloadPromise;
+      const failure = await download.failure();
+      if (failure) {
+        throw new Error('ダウンロード失敗: ' + failure);
       }
-      // 方式2: クリック（503なら即失敗）
-      if (size <= 0) {
-        try {
-          size = await downloadViaClick(page, acc, link, downloadPath);
-        } catch (e) {
-          errors.push(e);
-          console.warn(`⚠️ 【${acc.name}】クリック取得に失敗: ${safeLog(e.message)}`);
-        }
+
+      await download.saveAs(downloadPath);
+
+      if (!fs.existsSync(downloadPath)) {
+        throw new Error(
+          'ダウンロード後のCSVファイルを確認できませんでした。'
+        );
       }
-      if (size <= 0) {
-        waitExtra = Math.max(0, ...errors.map(e => e.waitMs || 0));
-        throw new Error(errors.map(e => e.message).join(' | ') || 'CSVが空です。');
+
+      const stat = fs.statSync(downloadPath);
+      if (stat.size <= 0) {
+        throw new Error(
+          'ダウンロードしたCSVファイルが空です。'
+        );
       }
-      console.log(`✅ 【${acc.name}】CSV取得成功（${size} bytes）。`);
+
+      console.log(
+        `✅ 【${acc.name}】CSVブラウザダウンロード成功（${stat.size} bytes）。`
+      );
       return;
     } catch (error) {
-      console.warn(`⚠️ 【${acc.name}】CSV取得失敗（${attempt}/${maxAttempts}）: ${safeLog(error.message)}`);
+      console.warn(
+        `⚠️ 【${acc.name}】CSVブラウザダウンロード失敗（${attempt}/${maxAttempts}）: ${safeLog(error.message)}`
+      );
+
       if (attempt >= maxAttempts) {
-        throw new Error(`CSV取得を${maxAttempts}回試行しましたが失敗しました。予約=${acc.exportRequestKey || '未取得'} / ${safeLog(error.message)}`);
+        throw new Error(
+          `CSVブラウザダウンロードを${maxAttempts}回試行しましたが失敗しました。予約=${acc.exportRequestKey || '未取得'} / ${safeLog(error.message)}`
+        );
       }
-      if (attempt % 3 === 0) {
-        console.log(`🔄 【${acc.name}】再ログインして同じ予約を再取得します。`);
-        await page.context().clearCookies().catch(() => {});
-        await page.goto(acc.url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-        await restoreExportSession(page, acc);
-      }
-      const backoff = Math.max(Math.min(30000 * Math.pow(2, attempt - 1), 300000), waitExtra);
-      console.log(`⏳ 【${acc.name}】${Math.round(backoff / 1000)}秒待って再試行します。`);
-      await page.waitForTimeout(backoff);
+
+      // #503成功時と同じく30秒間隔。同じ完了済み予約を維持する。
+      console.log(
+        `⏳ 【${acc.name}】30秒待って同じ予約=${acc.exportRequestKey || '未取得'}を再試行します。`
+      );
+      await page.waitForTimeout(30000);
     }
   }
 }
