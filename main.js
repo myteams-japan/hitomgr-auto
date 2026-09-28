@@ -888,94 +888,76 @@ async function downloadTargetCSVWithRetry(
   downloadPath,
   historySegment
 ) {
-  // B側はAPIRequestContextでdownload URLを直接GETすると503が継続するため、
-  // 実際の画面上のリンクをブラウザでクリックしてダウンロードする。
-  // 以前の成功実績がある方式へ戻し、同じ予約だけを再利用する。
-  const maxAttempts = 12;
-
+  const maxAttempts = 8;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(
-      `⬇️ 【${acc.name}】CSVブラウザダウンロード試行 ${attempt}/${maxAttempts}`
+      `⬇️ 【${acc.name}】CSVダウンロード試行 ${attempt}/${maxAttempts}`
     );
     try {
       if (attempt > 1) {
-        await navigateViaMenuOrUrl(
-          page,
-          acc,
-          '取出ファイル一覧',
-          historySegment
+        await page.goto(
+          acc.url.replace('/login/', '/' + historySegment),
+          {
+            waitUntil: 'domcontentloaded',
+            timeout: 60000
+          }
         );
-        await page.waitForTimeout(2000);
+        await restoreExportSession(page, acc);
+        await page.waitForTimeout(3000);
       }
-
       const downloadLink = await findDownloadLink(page, acc);
       if (!downloadLink) {
         throw new Error(
           '完成済み対象予約のダウンロードリンクを取得できませんでした。'
         );
       }
-
       const downloadPromise = page.waitForEvent('download', {
         timeout: 120000
       });
-
       await downloadLink.click({
         force: true,
-        timeout: 30000
+        timeout: 60000
       });
-
       const download = await downloadPromise;
-      const failure = await download.failure();
-      if (failure) {
-        throw new Error('ブラウザダウンロード失敗: ' + failure);
+      const downloadFailure = await download.failure();
+      if (downloadFailure) {
+        throw new Error(
+          'ダウンロード失敗: ' + downloadFailure
+        );
       }
-
       await download.saveAs(downloadPath);
-
       if (!fs.existsSync(downloadPath)) {
-        throw new Error('ダウンロード後のCSVファイルを確認できませんでした。');
+        throw new Error(
+          'ダウンロード後のCSVファイルを確認できませんでした。'
+        );
       }
       const stat = fs.statSync(downloadPath);
       if (stat.size <= 0) {
-        throw new Error('ダウンロードしたCSVファイルが空です。');
+        throw new Error(
+          'ダウンロードしたCSVファイルが空です。'
+        );
       }
-
       console.log(
-        `✅ 【${acc.name}】RAWデータのブラウザダウンロード成功（${stat.size} bytes）。`
+        `✅ 【${acc.name}】RAWデータのダウンロード・保存成功。`
       );
       return;
     } catch (error) {
       console.warn(
-        `⚠️ 【${acc.name}】CSVブラウザダウンロード失敗（${attempt}/${maxAttempts}）: ${safeLog(error.message)}`
+        `⚠️ 【${acc.name}】CSVダウンロード失敗（${attempt}/${maxAttempts}）: ${safeLog(error.message)}`
       );
-
       if (attempt >= maxAttempts) {
         throw new Error(
-          `CSVブラウザダウンロードを${maxAttempts}回試行しましたが成功しませんでした。予約=${acc.exportRequestKey || '未取得'} / ${safeLog(error.message)}`
+          `CSVダウンロードを${maxAttempts}回試行しましたが成功しませんでした。予約=${acc.exportRequestKey || '未取得'} / ${safeLog(error.message)}`
         );
       }
-
-      // 3回ごとにセッションを作り直すが、新規取出予約は作らない。
-      if (attempt % 3 === 0) {
-        console.log(
-          `🔄 【${acc.name}】ダウンロード失敗が連続したため再ログインし、同じ予約=${acc.exportRequestKey || '未取得'}を継続します。`
-        );
-        await page.context().clearCookies().catch(() => {});
-        await page.goto(acc.url, {
-          waitUntil: 'domcontentloaded',
-          timeout: 60000
-        }).catch(() => {});
-        await restoreExportSession(page, acc);
-      }
-
-      const waitMs = Math.min(90000, 15000 * attempt);
       console.log(
-        `⏳ 【${acc.name}】${Math.round(waitMs / 1000)}秒後に同じ予約を再試行します。`
+        `⏳ 【${acc.name}】30秒待機して同じ予約=${acc.exportRequestKey || '未取得'}を再試行します。`
       );
-      await page.waitForTimeout(waitMs);
+      await page.waitForTimeout(30000);
     }
   }
 }
+
 
 async function findReusableExport(page, acc, historySegment) {
   try {
