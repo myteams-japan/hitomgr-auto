@@ -370,80 +370,77 @@ async function navigateViaMenuOrUrl(
   targetText,
   targetUrlSegment
 ) {
-  const destinationUrl = acc.url.replace(
-    '/login/',
-    `/${targetUrlSegment}`
-  );
+  // ヒトマネ管理画面の実操作:
+  // 矢印アイコンにカーソルを合わせる → メニュー表示 →「取出ファイル一覧」をクリック。
+  // B側ではこのUI操作を優先し、download URLへ直接入らない。
+  const arrowSelectors = [
+    'ul.nav-tabs li:nth-child(5)',
+    '.nav-tabs li a:has(img)',
+    'li:has(.fa-share)',
+    'li:has(.fa-mail-forward)',
+    'li:has(.fa-reply)'
+  ];
 
-  // B側は矢印メニューを開いて「取出ファイル一覧」を選ぶ必要がある。
-  // メニュー操作が成功したように見えてもURLが一覧になっていなければ成功扱いしない。
-  try {
-    let targetLink = page.locator(`a:has-text("${targetText}")`).first();
+  let opened = false;
+  for (const selector of arrowSelectors) {
+    const arrow = page.locator(selector).first();
+    if (!(await arrow.isVisible().catch(() => false))) continue;
 
-    if (!(await targetLink.isVisible().catch(() => false))) {
-      const arrowCandidates = [
-        'ul.nav-tabs li:nth-child(5)',
-        'li:has(.fa-share)',
-        'li:has(.fa-mail-forward)',
-        'li:has(.fa-reply)',
-        '.nav-tabs li a:has(img)'
-      ];
+    console.log(
+      `🖱️ 【${acc.name}】管理画面の矢印にカーソルを合わせます。`
+    );
+    await arrow.hover({ timeout: 10000 }).catch(() => {});
+    await page.waitForTimeout(1200);
 
-      for (const selector of arrowCandidates) {
-        const arrow = page.locator(selector).first();
-        if (!(await arrow.isVisible().catch(() => false))) continue;
-
-        await arrow.hover().catch(() => {});
-        await arrow.click({ force: true, timeout: 10000 }).catch(() => {});
-        await page.waitForTimeout(1000);
-
-        targetLink = page.locator(`a:has-text("${targetText}")`).first();
-        if (await targetLink.isVisible().catch(() => false)) break;
-      }
-    }
-
-    if (await targetLink.isVisible().catch(() => false)) {
-      await targetLink.click({ force: true, timeout: 15000 });
+    const link = page.locator(`a:has-text("${targetText}")`).first();
+    if (await link.isVisible().catch(() => false)) {
+      console.log(
+        `📂 【${acc.name}】メニューの「${targetText}」をクリックします。`
+      );
+      await link.click({ timeout: 15000 });
       await page.waitForLoadState('domcontentloaded', {
         timeout: 30000
       }).catch(() => {});
       await page.waitForTimeout(1500);
-
-      if (new URL(page.url()).pathname.includes('/' + targetUrlSegment)) {
-        console.log(
-          `✅ 【${acc.name}】${targetText}へ移動成功: ${new URL(page.url()).pathname}`
-        );
-        return;
-      }
-
-      console.warn(
-        `⚠️ 【${acc.name}】メニュークリック後も一覧画面ではありません: ${new URL(page.url()).pathname}`
-      );
+      opened = true;
+      break;
     }
-  } catch (err) {
-    console.warn(
-      `⚠️ 【${acc.name}】${targetText}のメニュー操作失敗: ${safeLog(err.message)}`
-    );
   }
 
-  // メニュー操作が失敗した場合のみ既知URLへ直接移動。
+  const pathname = new URL(page.url()).pathname;
+  if (
+    opened &&
+    pathname.includes('/' + targetUrlSegment)
+  ) {
+    console.log(
+      `✅ 【${acc.name}】管理画面から${targetText}へ移動成功: ${pathname}`
+    );
+    return;
+  }
+
+  // A/BでUI構造差がある場合の保険。Bはまず必ず上のhover操作を試す。
+  console.warn(
+    `⚠️ 【${acc.name}】矢印メニュー操作で一覧へ移動できませんでした。現在: ${pathname}`
+  );
+  const destinationUrl = acc.url.replace(
+    '/login/',
+    `/${targetUrlSegment}`
+  );
   await page.goto(destinationUrl, {
     waitUntil: 'domcontentloaded',
     timeout: 60000
   });
-
   await restoreExportSession(page, acc);
   await page.waitForTimeout(1500);
 
-  const pathname = new URL(page.url()).pathname;
-  if (!pathname.includes('/' + targetUrlSegment)) {
+  const finalPath = new URL(page.url()).pathname;
+  if (!finalPath.includes('/' + targetUrlSegment)) {
     throw new Error(
-      `${targetText}へ移動できませんでした。現在の画面: ${pathname}`
+      `${targetText}へ移動できませんでした。現在の画面: ${finalPath}`
     );
   }
-
   console.log(
-    `✅ 【${acc.name}】${targetText}へ直接移動成功: ${pathname}`
+    `✅ 【${acc.name}】${targetText}へ移動成功: ${finalPath}`
   );
 }
 
