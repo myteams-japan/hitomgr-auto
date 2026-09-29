@@ -32,6 +32,14 @@ const QUEUE = 'https://kanri.hitomgr.jp/lwf3/csv_export_queues';
         links: [...row.querySelectorAll('a')].map(a => ({
           text: (a.innerText || '').replace(/\s+/g,' ').trim(),
           href: a.getAttribute('href') || ''
+        })),
+        controls: [...row.querySelectorAll('button,input,form')].map(el => ({
+          tag: el.tagName,
+          type: el.getAttribute('type') || '',
+          value: el.getAttribute('value') || '',
+          text: (el.innerText || '').replace(/\s+/g,' ').trim(),
+          action: el.getAttribute('action') || '',
+          name: el.getAttribute('name') || ''
         }))
       };
     }));
