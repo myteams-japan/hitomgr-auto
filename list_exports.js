@@ -28,7 +28,11 @@ const QUEUE = 'https://kanri.hitomgr.jp/lwf3/csv_export_queues';
         type: cells[1]?.innerText?.trim() || '',
         status: cells[2]?.innerText?.replace(/\s+/g,' ').trim() || '',
         detail: cells[3]?.innerText?.replace(/\s+/g,' ').trim() || '',
-        deleteDate: cells[4]?.innerText?.trim() || ''
+        deleteDate: cells[4]?.innerText?.trim() || '',
+        links: [...row.querySelectorAll('a')].map(a => ({
+          text: (a.innerText || '').replace(/\s+/g,' ').trim(),
+          href: a.getAttribute('href') || ''
+        }))
       };
     }));
     console.log('===EXPORT_ROWS_START===');
