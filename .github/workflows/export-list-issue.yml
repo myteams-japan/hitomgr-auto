@@ -1,0 +1,27 @@
+name: HITO Export Queue List
+
+permissions:
+  contents: read
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  list:
+    if: contains(github.event.issue.title, 'LIST EXPORTS')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci || npm install
+      - run: npx playwright install --with-deps chromium
+      - name: List export queue
+        env:
+          HITOMGR_ID_U003: ${{ secrets.HITOMGR_ID_U003 }}
+          HITOMGR_PASSWORD_PASSU003: ${{ secrets.HITOMGR_PASSWORD_PASSU003 }}
+        run: node list_exports.js
