@@ -99,16 +99,25 @@ async function latestCompleted(page) {
     if ((await cells.count()) < 3) continue;
     const date = (await cells.nth(0).innerText().catch(() => '')).trim();
     const status = (await cells.nth(2).innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+    const detail = (await row.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
     const link = row.locator('a[href*="/download/"],a[href*=".csv"],a:has-text("ダウンロード")').first();
     if (!/完了/.test(status) || !(await link.count())) continue;
     const href = await link.getAttribute('href').catch(() => null);
     const text = await link.innerText().catch(() => '');
     const key = (date.match(/\d+/g) || []).join('').padEnd(14, '0');
-    items.push({ i, date, status, href, text, key });
+    const countMatch = detail.match(/全\s*(\d+)\s*件/);
+    const totalCount = countMatch ? Number(countMatch[1]) : 0;
+    items.push({ i, date, status, href, text, key, totalCount, detail });
   }
-  items.sort((a,b) => b.key.localeCompare(a.key));
+  items.sort((a,b) => {
+    if (b.totalCount !== a.totalCount) return b.totalCount - a.totalCount;
+    return b.key.localeCompare(a.key);
+  });
   if (!items.length) throw new Error('完了済みのCSV取出しが見つかりません');
-  return items[0];
+  const full = items.find(x => x.totalCount >= 50000);
+  const chosen = full || items[0];
+  console.log('[EXPORT] chosen total=' + chosen.totalCount + ' date=' + chosen.date + ' href=' + chosen.href);
+  return chosen;
 }
 
 async function download(page) {
