@@ -1,0 +1,43 @@
+name: HITO Cleanup Analysis Issue Trigger
+
+permissions:
+  contents: read
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Analyze B cleanup candidates
+        env:
+          HITOMGR_ID_U003: ${{ secrets.HITOMGR_ID_U003 }}
+          HITOMGR_PASSWORD_PASSU003: ${{ secrets.HITOMGR_PASSWORD_PASSU003 }}
+        run: node analyze_cleanup.js
+
+      - name: Upload analysis summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hito-cleanup-analysis-${{ github.run_id }}
+          path: B_cleanup_analysis_summary.json
+          if-no-files-found: ignore
+          retention-days: 7
