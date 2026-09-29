@@ -294,6 +294,141 @@ function generatePatternFiles(
   return { path1, path2 };
 }
 
+function buildPublishedCleanupFile(
+  headerLine,
+  allRows,
+  basePath,
+  accountName
+) {
+  // HITO-Manager上限5万件に対し、通常/PV更新で最大3990件が新規掲載扱いに
+  // なっても超えないよう、更新後の安全余白として46000件を基準にする。
+  const HARD_LIMIT = 50000;
+  const UPDATE_MAX = 3990;
+  const SAFE_ACTIVE_LIMIT = HARD_LIMIT - UPDATE_MAX; // 46010
+  const idxB = colNameToIndex('B');
+  const idxC = colNameToIndex('C');
+  const idxD = colNameToIndex('D');
+  const idxE = colNameToIndex('E');
+  const idxGE = colNameToIndex('GE');
+
+  const active = allRows
+    .map((row, index) => ({ row, index }))
+    .filter(x => {
+      const status = x.row[idxD]
+        ? x.row[idxD].replace(/"/g, '').trim()
+        : '';
+      return status === '掲載';
+    });
+
+  console.log(
+    `📊 【${accountName}】更新前の掲載中求人: ${active.length}件`
+  );
+
+  if (active.length <= SAFE_ACTIVE_LIMIT) {
+    console.log(
+      `✅ 【${accountName}】掲載数に安全余白あり。5万件対策は不要です。`
+    );
+    return null;
+  }
+
+  // 「求人内容183項目」の完全一致 = E～GE（183列）を完全一致比較。
+  // A～Dの管理項目とGF～GHの管理/実績項目は重複判定から除外する。
+  const groups = new Map();
+  for (const item of active) {
+    const key = item.row
+      .slice(idxE, idxGE + 1)
+      .map(v => String(v || '').trim())
+      .join('\u001f');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+
+  const toRemove = new Set();
+  let duplicateRemoveCount = 0;
+
+  // 完全重複は開始日Bが最も新しい掲載1件だけ残し、それ以外を最優先で削減。
+  for (const items of groups.values()) {
+    if (items.length <= 1) continue;
+    items.sort((a, b) => {
+      const da = new Date(
+        (a.row[idxB] || '').replace(/"/g, '').trim()
+      ).getTime() || 0;
+      const db = new Date(
+        (b.row[idxB] || '').replace(/"/g, '').trim()
+      ).getTime() || 0;
+      return db - da;
+    });
+    for (let i = 1; i < items.length; i++) {
+      toRemove.add(items[i].index);
+      duplicateRemoveCount++;
+    }
+  }
+
+  // 重複削減だけで安全上限まで下がらない場合は、残った掲載求人を開始日の古い順。
+  let remaining = active.length - toRemove.size;
+  if (remaining > SAFE_ACTIVE_LIMIT) {
+    const need = remaining - SAFE_ACTIVE_LIMIT;
+    const oldest = active
+      .filter(x => !toRemove.has(x.index))
+      .sort((a, b) => {
+        const da = new Date(
+          (a.row[idxB] || '').replace(/"/g, '').trim()
+        ).getTime() || 0;
+        const db = new Date(
+          (b.row[idxB] || '').replace(/"/g, '').trim()
+        ).getTime() || 0;
+        return da - db;
+      });
+    for (let i = 0; i < need && i < oldest.length; i++) {
+      toRemove.add(oldest[i].index);
+    }
+  }
+
+  if (toRemove.size === 0) return null;
+
+  const now = new Date();
+  const startYear = now.getFullYear() - 3;
+  const endYear = now.getFullYear() - 2;
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const pastStart = `${startYear}/${mm}/${dd}`;
+  const pastEnd = `${endYear}/${mm}/${dd}`;
+
+  const cleanupRows = [...toRemove].map(index => {
+    const row = [...allRows[index]];
+    row[idxB] = pastStart;
+    row[idxC] = pastEnd;
+    row[idxD] = '非掲載';
+    return row;
+  });
+
+  const cleanupPath = basePath.replace(
+    '.csv',
+    '_published_cleanup.csv'
+  );
+  const cleanupContent = [
+    headerLine,
+    ...cleanupRows.map(toCSVLine)
+  ].join('\r\n');
+  fs.writeFileSync(
+    cleanupPath,
+    iconv.encode(cleanupContent, 'Shift_JIS')
+  );
+
+  console.log(
+    `🧹 【${accountName}】5万件対策CSV作成: ${cleanupRows.length}件 （完全重複優先=${duplicateRemoveCount}件、残りは古い順）`
+  );
+  console.log(
+    `📉 【${accountName}】対策後の既存掲載見込み: ${active.length - cleanupRows.length}件 ／更新最大${UPDATE_MAX}件を加えても${active.length - cleanupRows.length + UPDATE_MAX}件以下`
+  );
+
+  return {
+    path: cleanupPath,
+    count: cleanupRows.length,
+    duplicateCount: duplicateRemoveCount
+  };
+}
+
 function processCSVFile(filePath, accountName) {
   if (!fs.existsSync(filePath)) {
     console.log(
@@ -358,9 +493,16 @@ function processCSVFile(filePath, accountName) {
     accountName,
     'pv'
   );
+  const cleanup = buildPublishedCleanupFile(
+    headerLine,
+    allRows,
+    filePath,
+    accountName
+  );
   return {
     normal: normalFiles,
-    pv: pvFiles
+    pv: pvFiles,
+    cleanup
   };
 }
 async function navigateViaMenuOrUrl(
@@ -1382,6 +1524,28 @@ async function downloadAndPrepareCSV(browser, acc) {
     throw error;
   }
 }
+async function executePublishedCleanup(
+  page,
+  acc,
+  processed
+) {
+  if (!processed.cleanup) {
+    return;
+  }
+  console.log(
+    `🧹 【${acc.name}】通常更新後に5万件超過対策を実行します。`
+  );
+  await uploadSingleFileOnly(
+    page,
+    acc,
+    processed.cleanup.path,
+    '⑤掲載数5万件以下・完全重複優先削減'
+  );
+  console.log(
+    `✅ 【${acc.name}】掲載数削減CSVを送信しました: ${processed.cleanup.count}件`
+  );
+}
+
 async function executeNormalSet(
   page,
   acc,
@@ -1401,6 +1565,11 @@ async function executeNormalSet(
     acc,
     processed.normal.path2,
     '②通常版・掲載（後）'
+  );
+  await executePublishedCleanup(
+    page,
+    acc,
+    processed
   );
   console.log(
     `🎉 【${acc.name}】通常版2ファイルのアップロード処理を送信しました。`
@@ -1426,6 +1595,11 @@ async function executePvSet(
     acc,
     processed.pv.path2,
     '④PV版・掲載（後）'
+  );
+  await executePublishedCleanup(
+    page,
+    acc,
+    processed
   );
   console.log(
     `🎉 【${acc.name}】PV版2ファイルのアップロード処理を送信しました。`
