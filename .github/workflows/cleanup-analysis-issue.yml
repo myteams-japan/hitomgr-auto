@@ -9,6 +9,7 @@ on:
 
 jobs:
   analyze:
+    if: contains(github.event.issue.title, 'ANALYZE HITO')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
