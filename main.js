@@ -511,81 +511,103 @@ async function navigateViaMenuOrUrl(
   targetText,
   targetUrlSegment
 ) {
-  // ヒトマネ管理画面の実操作:
-  // 矢印アイコンにカーソルを合わせる → メニュー表示 →「取出ファイル一覧」をクリック。
-  // B側ではこのUI操作を優先し、download URLへ直接入らない。
-  const arrowSelectors = [
-    // A側で過去に実際に成功していた取出ファイル一覧メニュー
-    'li:has(a:has-text("面接カレンダー")) + li',
-    'li:has(.fa-refresh)',
-    // B側・共通候補
-    'ul.nav-tabs li:nth-child(5)',
-    '.nav-tabs li a:has(img)',
-    'li:has(.fa-share)',
-    'li:has(.fa-mail-forward)',
-    'li:has(.fa-reply)'
-  ];
+  // A側は過去の成功Run #503と同じメニュー取得方法を最優先する。
+  // 個別候補を順番に触るとIndeed設定メニューを誤選択したため、
+  // 成功時と同じ複合locatorのfirst()を使う。
+  try {
+    const menuHoverIcon = page.locator(
+      'li:has(a:has-text("面接カレンダー")) + li, ' +
+      'ul.nav-tabs li:nth-child(5), ' +
+      '.nav-tabs li a:has(img), li:has(.fa-refresh)'
+    ).first();
 
-  let opened = false;
-  for (const selector of arrowSelectors) {
-    const arrow = page.locator(selector).first();
-    if (!(await arrow.isVisible().catch(() => false))) continue;
-
-    console.log(
-      `🖱️ 【${acc.name}】管理画面の矢印にカーソルを合わせます。`
-    );
-    await arrow.hover({ timeout: 10000 }).catch(() => {});
-    await page.waitForTimeout(1200);
-
-    const link = page.locator(`a:has-text("${targetText}")`).first();
-    if (await link.isVisible().catch(() => false)) {
+    if (await menuHoverIcon.count() > 0) {
       console.log(
-        `📂 【${acc.name}】メニューの「${targetText}」をクリックします。`
+        `🖱️ 【${acc.name}】成功実績のある矢印メニューにカーソルを合わせます。`
       );
-      // A側ではIndeed連携のalertifyオーバーレイが残り、
-      // 通常クリックを遮ることがある。リンク自体は表示済みなので、
-      // まずオーバーレイ消失を短時間待ち、残っていてもforceで実行する。
-      const overlay = page.locator('#alertify-cover');
-      if (await overlay.isVisible().catch(() => false)) {
+      await menuHoverIcon.hover({ timeout: 10000 });
+      await page.waitForTimeout(1000);
+
+      const subMenuLink = page
+        .locator(`a:has-text("${targetText}")`)
+        .first();
+
+      if (
+        await subMenuLink.count() > 0 &&
+        await subMenuLink.isVisible().catch(() => false)
+      ) {
         console.log(
-          `⏳ 【${acc.name}】alertifyオーバーレイの消失を待ちます。`
+          `📂 【${acc.name}】メニューの「${targetText}」をクリックします。`
         );
-        await overlay.waitFor({
-          state: 'hidden',
-          timeout: 5000
+
+        const overlay = page.locator('#alertify-cover');
+        if (await overlay.isVisible().catch(() => false)) {
+          await overlay.waitFor({
+            state: 'hidden',
+            timeout: 5000
+          }).catch(() => {});
+        }
+
+        await subMenuLink.click({
+          force: true,
+          timeout: 15000
+        });
+        await page.waitForLoadState('networkidle', {
+          timeout: 30000
         }).catch(() => {});
+        await page.waitForTimeout(1500);
+
+        const currentPath = new URL(page.url()).pathname;
+        if (currentPath.includes('/' + targetUrlSegment)) {
+          console.log(
+            `✅ 【${acc.name}】管理画面から${targetText}へ移動成功: ${currentPath}`
+          );
+          return;
+        }
+
+        // A側の実リンクは /csv_export_queues。hrefが取れた場合は
+        // 推測URLではなく画面に存在する実hrefを使用する。
+        const href = await subMenuLink.getAttribute('href').catch(() => null);
+        if (href) {
+          const realUrl = new URL(href, page.url()).href;
+          console.log(
+            `↪️ 【${acc.name}】画面上の実リンクへ移動します: ${new URL(realUrl).pathname}`
+          );
+          await page.goto(realUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: 60000
+          });
+          await page.waitForTimeout(1500);
+          const realPath = new URL(page.url()).pathname;
+          if (
+            realPath.includes('/csv_export_queues') ||
+            realPath.includes('/' + targetUrlSegment)
+          ) {
+            console.log(
+              `✅ 【${acc.name}】取出ファイル一覧へ移動成功: ${realPath}`
+            );
+            return;
+          }
+        }
       }
-      await link.click({
-        force: true,
-        timeout: 15000
-      });
-      await page.waitForLoadState('domcontentloaded', {
-        timeout: 30000
-      }).catch(() => {});
-      await page.waitForTimeout(1500);
-      opened = true;
-      break;
     }
-  }
-
-  const pathname = new URL(page.url()).pathname;
-  if (
-    opened &&
-    pathname.includes('/' + targetUrlSegment)
-  ) {
-    console.log(
-      `✅ 【${acc.name}】管理画面から${targetText}へ移動成功: ${pathname}`
+  } catch (err) {
+    console.warn(
+      `⚠️ 【${acc.name}】成功実績メニュー操作失敗: ${safeLog(err.message)}`
     );
-    return;
   }
 
-  // A/BでUI構造差がある場合の保険。Bはまず必ず上のhover操作を試す。
-  console.warn(
-    `⚠️ 【${acc.name}】矢印メニュー操作で一覧へ移動できませんでした。現在: ${pathname}`
-  );
+  // B側は既知URLが有効。A側で404だったrec_export_historiesは二度と使わない。
+  const fallbackSegment = acc.name === 'A'
+    ? 'csv_export_queues'
+    : targetUrlSegment;
   const destinationUrl = acc.url.replace(
     '/login/',
-    `/${targetUrlSegment}`
+    `/${fallbackSegment}`
+  );
+
+  console.log(
+    `↪️ 【${acc.name}】取出ファイル一覧の既知URLへ移動: /${fallbackSegment}`
   );
   await page.goto(destinationUrl, {
     waitUntil: 'domcontentloaded',
@@ -595,13 +617,16 @@ async function navigateViaMenuOrUrl(
   await page.waitForTimeout(1500);
 
   const finalPath = new URL(page.url()).pathname;
-  if (!finalPath.includes('/' + targetUrlSegment)) {
+  if (
+    !finalPath.includes('/csv_export_queues') &&
+    !finalPath.includes('/' + targetUrlSegment)
+  ) {
     throw new Error(
-      `${targetText}へ移動できませんでした。現在の画面: ${finalPath}`
+      `取出ファイル一覧へ移動できませんでした。現在の画面: ${finalPath}`
     );
   }
   console.log(
-    `✅ 【${acc.name}】${targetText}へ移動成功: ${finalPath}`
+    `✅ 【${acc.name}】取出ファイル一覧へ移動成功: ${finalPath}`
   );
 }
 
@@ -1368,9 +1393,7 @@ async function downloadAndPrepareCSV(browser, acc) {
         (loginLastError ? ' 最終エラー: ' + safeLog(loginLastError.message) : '')
       );
     }
-    const historySegment = acc.name === 'B'
-      ? 'csv_export_queues'
-      : 'rec_export_histories';
+    const historySegment = 'csv_export_queues';
 
     // 再実行時に二重予約を作らないため、まず直近の既存予約を探す。
     logStage(acc, '既存CSV取出予約の確認');
