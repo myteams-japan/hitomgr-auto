@@ -1598,11 +1598,29 @@ async function downloadAndPrepareCSV(browser, acc) {
         Date.now() - 60000 + 9 * 60 * 60 * 1000
       ).toISOString().slice(0, 19).replace(/\D/g, '');
 
-      await exportBtn.click({ force: true });
+      // 検索直後のAjax/オーバーレイが残っている間は予約ボタンを押さない。
+      const overlay = page.locator('#alertify-cover');
+      if (await overlay.isVisible().catch(() => false)) {
+        await overlay.waitFor({
+          state: 'hidden',
+          timeout: 15000
+        }).catch(() => {});
+      }
+      await page.waitForTimeout(1500);
+
+      // force clickではなく通常クリックで、HITO-Manager側の本来のイベントを発火。
+      await exportBtn.click({
+        timeout: 30000
+      });
       console.log(
-        `✅ 【${acc.name}】新規ファイル取出予約を1回だけクリックしました。`
+        `✅ 【${acc.name}】掲載求人のみのファイル取出予約ボタンを1回クリックしました。`
       );
-      await page.waitForTimeout(3000);
+
+      // 予約登録の画面処理を待ってから一覧へ移動する。
+      await page.waitForLoadState('networkidle', {
+        timeout: 15000
+      }).catch(() => {});
+      await page.waitForTimeout(5000);
 
       logStage(acc, '取出ファイル一覧へ移動');
       await navigateViaMenuOrUrl(
