@@ -542,7 +542,23 @@ async function navigateViaMenuOrUrl(
       console.log(
         `📂 【${acc.name}】メニューの「${targetText}」をクリックします。`
       );
-      await link.click({ timeout: 15000 });
+      // A側ではIndeed連携のalertifyオーバーレイが残り、
+      // 通常クリックを遮ることがある。リンク自体は表示済みなので、
+      // まずオーバーレイ消失を短時間待ち、残っていてもforceで実行する。
+      const overlay = page.locator('#alertify-cover');
+      if (await overlay.isVisible().catch(() => false)) {
+        console.log(
+          `⏳ 【${acc.name}】alertifyオーバーレイの消失を待ちます。`
+        );
+        await overlay.waitFor({
+          state: 'hidden',
+          timeout: 5000
+        }).catch(() => {});
+      }
+      await link.click({
+        force: true,
+        timeout: 15000
+      });
       await page.waitForLoadState('domcontentloaded', {
         timeout: 30000
       }).catch(() => {});
