@@ -1345,111 +1345,104 @@ async function findReusableExport(page, acc, historySegment) {
 }
 async function filterPublishedRecruitments(page, acc) {
   console.log(
-    `🔎 【${acc.name}】募集一覧を「掲載求人のみ」に絞り込みます。`
+    `🔎 【${acc.name}】募集管理 → ステータス「掲載のみ」→ 検索 の順で絞り込みます。`
   );
 
-  // HITO-Managerは掲載ステータスがselectとは限らないため、
-  // 画面上の「掲載」ラベルを持つcheckbox/radio/selectを順に探す。
-  // 「非掲載」や曖昧一致は選ばない。
-  let applied = false;
+  // 画面仕様:
+  // ステータス [掲載のみ] [非掲載のみ] のcheckbox。
+  // ラベル文字列を基準に「掲載のみ」だけを選び、「非掲載のみ」は解除する。
+  async function setStatusCheckbox(labelText, checked) {
+    const label = page.locator('label').filter({
+      hasText: new RegExp('^\\s*' + labelText + '\\s*$')
+    }).first();
 
-  // 1) select
-  const selects = page.locator('select');
-  for (let i = 0; i < await selects.count(); i++) {
-    const select = selects.nth(i);
-    const options = await select.locator('option').allTextContents().catch(() => []);
-    const exact = options.find(x => x.replace(/\s+/g, '').trim() === '掲載');
-    if (exact) {
-      await select.selectOption({ label: exact });
-      applied = true;
-      console.log(`✅ 【${acc.name}】selectで掲載を選択しました。`);
-      break;
-    }
-  }
-
-  // 2) label「掲載」に紐づくcheckbox/radio
-  if (!applied) {
-    const labels = page.locator('label');
-    const labelCount = await labels.count();
-    for (let i = 0; i < labelCount; i++) {
-      const label = labels.nth(i);
-      const text = (await label.innerText().catch(() => ''))
-        .replace(/\s+/g, '').trim();
-      if (text !== '掲載') continue;
-
+    if (await label.count() > 0) {
       const forId = await label.getAttribute('for').catch(() => null);
-      let input = null;
-      if (forId) {
-        input = page.locator('#' + CSS.escape(forId)).first();
-      } else {
-        input = label.locator('input[type="checkbox"], input[type="radio"]').first();
+      let input = forId
+        ? page.locator('#' + forId).first()
+        : label.locator('input[type="checkbox"]').first();
+
+      if (await input.count() === 0) {
+        input = label.locator('xpath=preceding-sibling::input[1]').first();
       }
-      if (input && await input.count() > 0) {
-        await input.check({ force: true }).catch(async () => {
-          await label.click({ force: true });
-        });
-        if (await input.isChecked().catch(() => true)) {
-          applied = true;
-          console.log(`✅ 【${acc.name}】掲載チェックを選択しました。`);
-          break;
+      if (await input.count() === 0) {
+        input = label.locator('xpath=following-sibling::input[1]').first();
+      }
+      if (await input.count() > 0) {
+        if (checked) {
+          await input.check({ force: true });
+        } else {
+          await input.uncheck({ force: true });
         }
+        return input;
       }
     }
-  }
 
-  // 3) value/名前から掲載専用inputを探す（完全一致のみ）
-  if (!applied) {
-    const inputs = page.locator('input[type="checkbox"], input[type="radio"]');
-    for (let i = 0; i < await inputs.count(); i++) {
-      const input = inputs.nth(i);
-      const value = (await input.getAttribute('value').catch(() => '') || '').trim();
-      const aria = (await input.getAttribute('aria-label').catch(() => '') || '')
-        .replace(/\s+/g, '').trim();
-      if (value === '掲載' || aria === '掲載') {
-        await input.check({ force: true });
-        applied = true;
-        console.log(`✅ 【${acc.name}】掲載inputを選択しました。`);
-        break;
+    // HITO-Managerはinputの直後にテキストだけ置く場合もあるため、
+    // ステータス行の文字列から近接checkboxを特定する。
+    const textNode = page.getByText(labelText, { exact: true }).first();
+    if (await textNode.count() > 0) {
+      let input = textNode.locator('xpath=preceding::input[@type="checkbox"][1]').first();
+      if (await input.count() > 0) {
+        if (checked) {
+          await input.check({ force: true });
+        } else {
+          await input.uncheck({ force: true });
+        }
+        return input;
       }
     }
+    return null;
   }
 
-  if (!applied) {
-    // 誤って全求人を取出すより安全に停止。診断用にフォーム構造だけログへ残す。
-    const formSummary = await page.locator('select, input[type="checkbox"], input[type="radio"]')
-      .evaluateAll(els => els.slice(0, 80).map(el => ({
-        tag: el.tagName,
-        name: el.getAttribute('name'),
-        id: el.id,
-        value: el.getAttribute('value'),
-        aria: el.getAttribute('aria-label')
-      }))).catch(() => []);
-    console.log(
-      '🔎 掲載条件候補フォーム: ' + safeLog(JSON.stringify(formSummary))
-    );
+  const published = await setStatusCheckbox('掲載のみ', true);
+  if (!published) {
     throw new Error(
-      '掲載ステータス「掲載」の入力欄を特定できないため、全求人の取出予約は作らず停止します。'
+      'ステータス「掲載のみ」のチェックボックスを特定できません。全求人取出を防ぐため停止します。'
     );
   }
+
+  await setStatusCheckbox('非掲載のみ', false).catch(() => {});
+
+  if (!(await published.isChecked().catch(() => false))) {
+    throw new Error(
+      'ステータス「掲載のみ」にチェックできませんでした。全求人取出を防ぐため停止します。'
+    );
+  }
+
+  console.log(
+    `✅ 【${acc.name}】ステータス「掲載のみ」にチェックしました。`
+  );
 
   const searchButton = page.locator(
-    'button:has-text("検索"), input[type="submit"][value*="検索"], a:has-text("検索")'
-  ).first();
+    'button:has-text("検索"), input[type="submit"][value="検索"], input[type="button"][value="検索"], a:has-text("検索")'
+  ).filter({ visible: true }).first();
 
   if (!(await searchButton.isVisible().catch(() => false))) {
     throw new Error(
-      '募集一覧の検索ボタンを特定できません。全求人取出を防ぐため停止します。'
+      '募集一覧の「検索」ボタンを特定できません。全求人取出を防ぐため停止します。'
     );
   }
 
+  console.log(
+    `🔎 【${acc.name}】検索を実行します。`
+  );
   await searchButton.click({ force: true, timeout: 15000 });
   await page.waitForLoadState('domcontentloaded', {
     timeout: 30000
   }).catch(() => {});
   await page.waitForTimeout(1500);
 
+  // 検索後も掲載のみ条件が保持されていることを確認。
+  const checkedAfter = await published.isChecked().catch(() => true);
+  if (!checkedAfter) {
+    throw new Error(
+      '検索後に「掲載のみ」条件が外れました。全求人取出を防ぐため停止します。'
+    );
+  }
+
   console.log(
-    `✅ 【${acc.name}】掲載求人のみの検索条件を適用しました。`
+    `✅ 【${acc.name}】掲載求人のみの検索結果になりました。この状態でファイル取出予約へ進みます。`
   );
 }
 
