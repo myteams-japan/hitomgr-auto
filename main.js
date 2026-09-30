@@ -300,11 +300,10 @@ function buildPublishedCleanupFile(
   basePath,
   accountName
 ) {
-  // HITO-Manager上限5万件に対し、通常/PV更新で最大3990件が新規掲載扱いに
-  // なっても超えないよう、更新後の安全余白として46000件を基準にする。
+  // 毎回の通常/PV更新は同じ対象を「非掲載→掲載」に戻すため、
+  // 掲載総数は原則増えない。更新後に5万件を超える分だけ削減する。
   const HARD_LIMIT = 50000;
-  const UPDATE_MAX = 3990;
-  const SAFE_ACTIVE_LIMIT = HARD_LIMIT - UPDATE_MAX; // 46010
+  const SAFE_ACTIVE_LIMIT = HARD_LIMIT
   const idxB = colNameToIndex('B');
   const idxC = colNameToIndex('C');
   const idxD = colNameToIndex('D');
@@ -446,6 +445,25 @@ function processCSVFile(filePath, accountName) {
   if (allRows.length === 0) {
     return null;
   }
+
+  const idxD = colNameToIndex('D');
+  const nonPublishedCount = allRows.filter(row => {
+    const status = row[idxD]
+      ? row[idxD].replace(/"/g, '').trim()
+      : '';
+    return status !== '掲載';
+  }).length;
+
+  if (nonPublishedCount > 0) {
+    throw new Error(
+      `掲載求人のみ取出のはずですが、非掲載等が${nonPublishedCount}件含まれています。誤更新防止のため停止します。`
+    );
+  }
+
+  console.log(
+    `✅ 【${accountName}】取出CSVは掲載求人のみ: ${allRows.length}件`
+  );
+
   const normalFiltered = allRows.filter(row => {
     const valGG = row[idxGG]
       ? row[idxGG].replace(/"/g, '').trim()
@@ -1252,8 +1270,12 @@ async function findReusableExport(page, acc, historySegment) {
         // 完了済みCSVはdownload URLが403/503で壊れたまま残る事例があるため、
         // 次回Runでは再利用せず新しい取出予約を1回だけ作る。
         const active = /待機中|進行中|出力中/.test(row.status);
+        // 掲載求人のみ取出へ切替後に作成された予約だけ再利用する。
+        // 旧「全求人」予約を再利用しない。
+        const publishedOnlyRolloutKey = '20260930120000';
         return ageSeconds >= 0 &&
           ageSeconds <= 60000 &&
+          row.key >= publishedOnlyRolloutKey &&
           active;
       })
       .sort((a, b) => b.key.localeCompare(a.key))[0];
@@ -1281,6 +1303,66 @@ async function findReusableExport(page, acc, historySegment) {
     );
   }
 }
+async function filterPublishedRecruitments(page, acc) {
+  console.log(
+    `🔎 【${acc.name}】募集一覧を「掲載求人のみ」に絞り込みます。`
+  );
+
+  // 「掲載」「非掲載」の両方を選択肢に持つselectを掲載ステータス欄として特定。
+  const selects = page.locator('select');
+  const count = await selects.count();
+  let statusSelect = null;
+
+  for (let i = 0; i < count; i++) {
+    const select = selects.nth(i);
+    const options = await select.locator('option').allTextContents().catch(() => []);
+    const normalized = options.map(x => x.replace(/\s+/g, '').trim());
+    if (normalized.includes('掲載') && normalized.includes('非掲載')) {
+      statusSelect = select;
+      break;
+    }
+  }
+
+  if (!statusSelect) {
+    throw new Error(
+      '掲載ステータスの絞り込み欄を特定できないため、全求人の取出予約は作らず停止します。'
+    );
+  }
+
+  // valueは画面依存なので、表示ラベル「掲載」を完全一致で選択。
+  await statusSelect.selectOption({ label: '掲載' });
+
+  const selectedText = await statusSelect
+    .locator('option:checked')
+    .innerText()
+    .catch(() => '');
+  if (selectedText.replace(/\s+/g, '').trim() !== '掲載') {
+    throw new Error(
+      '掲載ステータスを「掲載」に設定できませんでした。全求人取出を防ぐため停止します。'
+    );
+  }
+
+  const searchButton = page.locator(
+    'button:has-text("検索"), input[type="submit"][value*="検索"], a:has-text("検索")'
+  ).first();
+
+  if (!(await searchButton.isVisible().catch(() => false))) {
+    throw new Error(
+      '募集一覧の検索ボタンを特定できません。全求人取出を防ぐため停止します。'
+    );
+  }
+
+  await searchButton.click({ force: true, timeout: 15000 });
+  await page.waitForLoadState('domcontentloaded', {
+    timeout: 30000
+  }).catch(() => {});
+  await page.waitForTimeout(1500);
+
+  console.log(
+    `✅ 【${acc.name}】掲載求人のみの検索条件を適用しました。`
+  );
+}
+
 async function downloadAndPrepareCSV(browser, acc) {
   logStage(acc, 'ブラウザ画面作成');
   const context = await browser.newContext({
@@ -1416,7 +1498,10 @@ async function downloadAndPrepareCSV(browser, acc) {
         timeout: 60000
       });
 
-      logStage(acc, 'CSV取出予約');
+      logStage(acc, '掲載求人のみへ絞り込み');
+      await filterPublishedRecruitments(page, acc);
+
+      logStage(acc, 'CSV取出予約（掲載求人のみ）');
       const exportBtn = page.locator(
         'a:has-text("ファイル取出予約"), ' +
         'button:has-text("ファイル取出予約")'
