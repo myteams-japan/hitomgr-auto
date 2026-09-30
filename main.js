@@ -87,6 +87,46 @@ async function sendChatworkError(currentState, acc, error) {
   }
 }
 
+async function sendChatworkInfo(title, lines) {
+  const token = process.env.CHATWORK_API_TOKEN;
+  if (!token) {
+    console.warn('⚠️ CHATWORK_API_TOKENが設定されていないためChatwork通知を送信できません。');
+    return;
+  }
+  const message = [
+    '[info][title]' + title + '[/title]',
+    ...lines.map(safeLog),
+    '[/info]'
+  ].join('\n');
+  try {
+    const response = await fetch(
+      `https://api.chatwork.com/v2/rooms/${CHATWORK_ROOM_ID}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          'X-ChatWorkToken': token,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: new URLSearchParams({
+          body: message,
+          self_unread: '1'
+        }).toString()
+      }
+    );
+    if (!response.ok) {
+      console.warn(
+        `⚠️ Chatwork通知失敗 HTTP ${response.status}: ${safeLog(await response.text())}`
+      );
+    } else {
+      console.log('✅ Chatworkマイチャットへ通知しました。');
+    }
+  } catch (error) {
+    console.warn(
+      `⚠️ Chatwork通知処理エラー: ${safeLog(error.message)}`
+    );
+  }
+}
+
 function logStage(acc, stage) {
   const now = Date.now();
   if (acc.logStage) {
@@ -1779,6 +1819,13 @@ async function executePvSet(
   console.log(
     `🤖 現在のインデックス: ${index} → 今回の処理: ${currentState}`
   );
+  await sendChatworkInfo(
+    'HITO-Manager 更新開始',
+    [
+      `処理：${currentState}`,
+      'GitHub Actionsで更新処理を開始しました。'
+    ]
+  );
   const browser = await chromium.launch({
     headless: true
   });
@@ -1854,6 +1901,14 @@ async function executePvSet(
     console.log(
       `🏁 ${currentState}の送信操作が終了しました。` +
       'サーバー取込完了は未検証です。'
+    );
+    await sendChatworkInfo(
+      'HITO-Manager 更新成功',
+      [
+        `処理：${currentState}`,
+        `次回：${rotation[(index + 1) % rotation.length]}`,
+        '更新ファイルの取込予約送信まで完了しました。'
+      ]
     );
   } catch (err) {
     console.log(
