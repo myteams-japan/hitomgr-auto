@@ -515,6 +515,10 @@ async function navigateViaMenuOrUrl(
   // 矢印アイコンにカーソルを合わせる → メニュー表示 →「取出ファイル一覧」をクリック。
   // B側ではこのUI操作を優先し、download URLへ直接入らない。
   const arrowSelectors = [
+    // A側で過去に実際に成功していた取出ファイル一覧メニュー
+    'li:has(a:has-text("面接カレンダー")) + li',
+    'li:has(.fa-refresh)',
+    // B側・共通候補
     'ul.nav-tabs li:nth-child(5)',
     '.nav-tabs li a:has(img)',
     'li:has(.fa-share)',
@@ -1228,7 +1232,12 @@ async function findReusableExport(page, acc, historySegment) {
     console.warn(
       `⚠️ 【${acc.name}】既存取出予約の確認に失敗: ${safeLog(error.message)}`
     );
-    return false;
+    // 一覧を確認できない状態でfalseを返すと新規予約を作り、
+    // 二重予約になるため必ず停止する。
+    throw new Error(
+      '既存取出予約を確認できないため、新規予約を作らず停止します: ' +
+      safeLog(error.message)
+    );
   }
 }
 async function downloadAndPrepareCSV(browser, acc) {
