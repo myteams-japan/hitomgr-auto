@@ -1348,37 +1348,87 @@ async function filterPublishedRecruitments(page, acc) {
     `🔎 【${acc.name}】募集一覧を「掲載求人のみ」に絞り込みます。`
   );
 
-  // 「掲載」「非掲載」の両方を選択肢に持つselectを掲載ステータス欄として特定。
-  const selects = page.locator('select');
-  const count = await selects.count();
-  let statusSelect = null;
+  // HITO-Managerは掲載ステータスがselectとは限らないため、
+  // 画面上の「掲載」ラベルを持つcheckbox/radio/selectを順に探す。
+  // 「非掲載」や曖昧一致は選ばない。
+  let applied = false;
 
-  for (let i = 0; i < count; i++) {
+  // 1) select
+  const selects = page.locator('select');
+  for (let i = 0; i < await selects.count(); i++) {
     const select = selects.nth(i);
     const options = await select.locator('option').allTextContents().catch(() => []);
-    const normalized = options.map(x => x.replace(/\s+/g, '').trim());
-    if (normalized.includes('掲載') && normalized.includes('非掲載')) {
-      statusSelect = select;
+    const exact = options.find(x => x.replace(/\s+/g, '').trim() === '掲載');
+    if (exact) {
+      await select.selectOption({ label: exact });
+      applied = true;
+      console.log(`✅ 【${acc.name}】selectで掲載を選択しました。`);
       break;
     }
   }
 
-  if (!statusSelect) {
-    throw new Error(
-      '掲載ステータスの絞り込み欄を特定できないため、全求人の取出予約は作らず停止します。'
-    );
+  // 2) label「掲載」に紐づくcheckbox/radio
+  if (!applied) {
+    const labels = page.locator('label');
+    const labelCount = await labels.count();
+    for (let i = 0; i < labelCount; i++) {
+      const label = labels.nth(i);
+      const text = (await label.innerText().catch(() => ''))
+        .replace(/\s+/g, '').trim();
+      if (text !== '掲載') continue;
+
+      const forId = await label.getAttribute('for').catch(() => null);
+      let input = null;
+      if (forId) {
+        input = page.locator('#' + CSS.escape(forId)).first();
+      } else {
+        input = label.locator('input[type="checkbox"], input[type="radio"]').first();
+      }
+      if (input && await input.count() > 0) {
+        await input.check({ force: true }).catch(async () => {
+          await label.click({ force: true });
+        });
+        if (await input.isChecked().catch(() => true)) {
+          applied = true;
+          console.log(`✅ 【${acc.name}】掲載チェックを選択しました。`);
+          break;
+        }
+      }
+    }
   }
 
-  // valueは画面依存なので、表示ラベル「掲載」を完全一致で選択。
-  await statusSelect.selectOption({ label: '掲載' });
+  // 3) value/名前から掲載専用inputを探す（完全一致のみ）
+  if (!applied) {
+    const inputs = page.locator('input[type="checkbox"], input[type="radio"]');
+    for (let i = 0; i < await inputs.count(); i++) {
+      const input = inputs.nth(i);
+      const value = (await input.getAttribute('value').catch(() => '') || '').trim();
+      const aria = (await input.getAttribute('aria-label').catch(() => '') || '')
+        .replace(/\s+/g, '').trim();
+      if (value === '掲載' || aria === '掲載') {
+        await input.check({ force: true });
+        applied = true;
+        console.log(`✅ 【${acc.name}】掲載inputを選択しました。`);
+        break;
+      }
+    }
+  }
 
-  const selectedText = await statusSelect
-    .locator('option:checked')
-    .innerText()
-    .catch(() => '');
-  if (selectedText.replace(/\s+/g, '').trim() !== '掲載') {
+  if (!applied) {
+    // 誤って全求人を取出すより安全に停止。診断用にフォーム構造だけログへ残す。
+    const formSummary = await page.locator('select, input[type="checkbox"], input[type="radio"]')
+      .evaluateAll(els => els.slice(0, 80).map(el => ({
+        tag: el.tagName,
+        name: el.getAttribute('name'),
+        id: el.id,
+        value: el.getAttribute('value'),
+        aria: el.getAttribute('aria-label')
+      }))).catch(() => []);
+    console.log(
+      '🔎 掲載条件候補フォーム: ' + safeLog(JSON.stringify(formSummary))
+    );
     throw new Error(
-      '掲載ステータスを「掲載」に設定できませんでした。全求人取出を防ぐため停止します。'
+      '掲載ステータス「掲載」の入力欄を特定できないため、全求人の取出予約は作らず停止します。'
     );
   }
 
